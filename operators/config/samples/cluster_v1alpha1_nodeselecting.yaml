@@ -1,0 +1,10 @@
+apiVersion: cluster.dreemk8s/v1aplha1
+kind: NodeSelecting
+metadata:
+  labels:
+    app.kubernetes.io/name: operators
+    app.kubernetes.io/managed-by: kustomize
+  name: nodeselecting-sample
+  namespace: dreem
+spec:
+  # TODO(user): Add fields here

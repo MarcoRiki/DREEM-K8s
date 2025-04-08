@@ -1,0 +1,13 @@
+apiVersion: cluster.dreemk8s/v1alpha1
+kind: ClusterConfiguration
+metadata:
+  labels:
+    app.kubernetes.io/name: operators
+    app.kubernetes.io/managed-by: kustomize
+  name: clusterconfiguration-sample
+  namespace: dreem
+spec:
+  maxNodes: 5
+  minNodes: 1
+  scalingLabel: 1
+

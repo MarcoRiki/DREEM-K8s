@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- cluster_v1aplha1_clusterconfiguration.yaml
+- cluster_v1aplha1_nodeselecting.yaml
+- cluster_v1alpha1_nodehandling.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

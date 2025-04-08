@@ -1,0 +1,38 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - cluster.dreemk8s
+  resources:
+  - clusterconfigurations
+  - nodehandlings
+  - nodeselectings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cluster.dreemk8s
+  resources:
+  - clusterconfigurations/finalizers
+  - nodehandlings/finalizers
+  - nodeselectings/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cluster.dreemk8s
+  resources:
+  - clusterconfigurations/status
+  - nodehandlings/status
+  - nodeselectings/status
+  verbs:
+  - get
+  - patch
+  - update
