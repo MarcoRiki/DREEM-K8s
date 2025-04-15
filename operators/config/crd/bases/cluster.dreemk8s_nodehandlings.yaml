@@ -39,13 +39,25 @@ spec:
           spec:
             description: NodeHandlingSpec defines the desired state of NodeHandling.
             properties:
-              foo:
-                description: Foo is an example field of NodeHandling. Edit nodehandling_types.go
-                  to remove/update
+              nodeSelectingName:
                 type: string
+              scalingLabel:
+                format: int32
+                type: integer
+              selectedNode:
+                type: string
+            required:
+            - nodeSelectingName
+            - scalingLabel
+            - selectedNode
             type: object
           status:
             description: NodeHandlingStatus defines the observed state of NodeHandling.
+            properties:
+              phase:
+                type: string
+            required:
+            - phase
             type: object
         type: object
     served: true

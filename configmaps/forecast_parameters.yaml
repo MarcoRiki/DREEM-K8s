@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: forecast-parameters
-  namespace: default
+  namespace: dreem
 data:
   Prometheus_URL: "https://prometheus.crownlabs.polito.it/"
   Prometheus_rate_interval: "10m"

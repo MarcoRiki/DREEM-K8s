@@ -18,10 +18,13 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -39,44 +42,82 @@ type Response struct {
 	SelectedNode string `json:"selectedNode"`
 }
 
+var URL = "http://localhost:8000/"
+
+// get the name of the chosen node (to shut down or scale up) from the server
+// the server is a simple HTTP server that returns a JSON object with the name of the node
 func getNodeLabel(ctx context.Context, scalingLabel int32) (string, error) {
 	log := log.FromContext(ctx)
-
+	url := URL
 	if scalingLabel > 0 {
-		url := "http://localhost:8000/nodes/scaleUp"
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			log.Error(err, "unable to create request")
-			return "", err
-		}
-
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Error(err, "unable to send request")
-			return "", err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			log.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "request failed")
-			return "", err
-		}
-
-		var response Response
-		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-			log.Error(err, "unable to decode response")
-			return "", err
-		}
-		log.Info("Node label received from server", "nodeLabel", response.SelectedNode)
-		return response.SelectedNode, nil
+		url = url + "nodes/scaleUp"
+	} else if scalingLabel < 0 {
+		url = url + "nodes/scaleDown"
 	}
 
-	// call the server localhost:8000/nodes/scaleDown
-	if scalingLabel < 0 {
-		return "", nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Error(err, "unable to create request")
+		return "", err
 	}
-	return "", nil
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Error(err, "unable to send request")
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Error(fmt.Errorf("unexpected status code: %d", resp.StatusCode), "request failed")
+		return "", err
+	}
+
+	var response Response
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		log.Error(err, "unable to decode response")
+		return "", err
+	}
+	log.Info("Node label received from server", "nodeLabel", response.SelectedNode)
+	return response.SelectedNode, nil
+
+}
+
+func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, selectedNode string, NodeSelectingName string, scalingLabel int32) bool {
+	log := log.FromContext(ctx)
+
+	// timer of 10 seconds just for testing
+	log.Info("Creating the NodeHandling CRD")
+	time.Sleep(10 * time.Second)
+
+	// create unique identifier for the NodeHandling CRD
+	crdNameBytes := make([]byte, 8)
+	if _, err := rand.Read(crdNameBytes); err != nil {
+		log.Error(err, "unable to generate random name for NodeHandling CRD")
+		return false
+	}
+	crdName := "node-handling-" + fmt.Sprintf("%x", crdNameBytes)
+	// create the NodeHandling CRD
+	var nodeHandling = &clusterv1alpha1.NodeHandling{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crdName,
+			Namespace: "dreem",
+		},
+		Spec: clusterv1alpha1.NodeHandlingSpec{
+			NodeSelectingName: NodeSelectingName,
+			SelectedNode:      selectedNode,
+			ScalingLabel:      scalingLabel,
+		},
+	}
+
+	if err := r.Client.Create(ctx, nodeHandling); err != nil {
+		log.Error(err, "unable to create NodeHandling CRD")
+		return false
+	}
+	log.Info("NodeHandling CRD created", "name", nodeHandling.Name)
+
+	return true
 }
 
 // NodeSelectingReconciler reconciles a NodeSelecting object
@@ -109,7 +150,6 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	log.Info("NodeSelecting CRD found", "name", nodeSelecting.Name)
 
 	if nodeSelecting.Status.Phase == "" {
-		log.Info("NodeSelecting CRD setting the initial status")
 
 		var clusterConfigurationList clusterv1alpha1.ClusterConfigurationList
 		if err := r.Client.List(ctx, &clusterConfigurationList); err != nil {
@@ -117,17 +157,28 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 
-		if len(clusterConfigurationList.Items) != 1 {
-			log.Error(nil, "expected exactly one ClusterConfiguration resource, but found", "count", len(clusterConfigurationList.Items))
-			return ctrl.Result{}, nil
+		// find the clusterconfiguration with the name in the spec
+		var clusterConfiguration *clusterv1alpha1.ClusterConfiguration
+		for _, cc := range clusterConfigurationList.Items {
+			if cc.Name == nodeSelecting.Spec.ClusterConfigurationName {
+				clusterConfiguration = &cc
+				break
+			}
 		}
-
-		clusterConfiguration := &clusterConfigurationList.Items[0]
+		if clusterConfiguration == nil {
+			log.Info("Unable to find the ClusterConfiguration parent resource", "name", nodeSelecting.Spec.ClusterConfigurationName)
+			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
+			if err := r.Status().Update(ctx, nodeSelecting); err != nil {
+				log.Error(err, "unable to update the NodeSelecting status")
+			}
+			return ctrl.Result{}, fmt.Errorf("unable to find the ClusterConfiguration parent resource")
+		}
 
 		if err := ctrl.SetControllerReference(clusterConfiguration, nodeSelecting, r.Scheme); err != nil {
 			log.Error(err, "unable to set owner reference on NodeSelecting")
 			return ctrl.Result{}, err
 		}
+
 		if err := r.Client.Update(ctx, nodeSelecting); err != nil {
 			log.Error(err, "unable to update NodeSelecting with owner reference")
 			return ctrl.Result{}, err
@@ -141,8 +192,6 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseRunning {
-		log.Info("NodeSelecting calls the server to have the node label")
-
 		nodeLabel, err := getNodeLabel(ctx, nodeSelecting.Spec.ScalingLabel)
 		if err != nil {
 			log.Error(err, "unable to get the node label")
@@ -150,24 +199,23 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.Status().Update(ctx, nodeSelecting); err != nil {
 				log.Error(err, "unable to update the NodeSelecting status")
 			}
+
 			return ctrl.Result{}, err
 		}
 		log.Info("Node label received", "nodeLabel", nodeLabel)
 
-		nodeSelecting.Status.SelectedNode = nodeLabel
-		nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseComplete
+		if createNodeHandlingCRD(ctx, r, nodeLabel, nodeSelecting.Name, nodeSelecting.Spec.ScalingLabel) {
+			nodeSelecting.Status.SelectedNode = nodeLabel
+			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseComplete
+
+		} else {
+			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
+		}
 
 		if err := r.Status().Update(ctx, nodeSelecting); err != nil {
 			log.Error(err, "unable to update the NodeSelecting status")
 			return ctrl.Result{}, err
 		}
-
-	}
-
-	if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseComplete {
-		log.Info("Creating the NodeHandling CRD")
-
-		// TODO: logic to create the NodeHandling CRD
 	}
 
 	return ctrl.Result{}, nil
@@ -223,5 +271,6 @@ func (r *NodeSelectingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}),
 		).
+		//Owns(&clusterv1alpha1.NodeHandling{}).
 		Complete(r)
 }

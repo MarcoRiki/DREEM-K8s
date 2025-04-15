@@ -20,12 +20,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type NodeHandlingPhase string
+type NodeSelectingPhase string
 
 const (
-	NS_PhaseRunning  NodeHandlingPhase = "Running"
-	NS_PhaseComplete NodeHandlingPhase = "Completed"
-	NS_PhaseFailed   NodeHandlingPhase = "Failed"
+	NS_PhaseRunning  NodeSelectingPhase = "Running"
+	NS_PhaseComplete NodeSelectingPhase = "Completed"
+	NS_PhaseFailed   NodeSelectingPhase = "Failed"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -36,8 +36,8 @@ type NodeSelectingSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	//ClusterConfigurationName string `json:"clusterConfigurationName"`
-	ScalingLabel int32 `json:"scalingLabel"`
+	ClusterConfigurationName string `json:"clusterConfigurationName"`
+	ScalingLabel             int32  `json:"scalingLabel"`
 }
 
 // NodeSelectingStatus defines the observed state of NodeSelecting.
@@ -45,8 +45,8 @@ type NodeSelectingStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	SelectedNode string            `json:"selectedNode"`
-	Phase        NodeHandlingPhase `json:"phase"`
+	SelectedNode string             `json:"selectedNode"`
+	Phase        NodeSelectingPhase `json:"phase"`
 }
 
 // +kubebuilder:object:root=true

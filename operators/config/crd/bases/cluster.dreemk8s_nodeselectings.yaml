@@ -39,11 +39,13 @@ spec:
           spec:
             description: NodeSelectingSpec defines the desired state of NodeSelecting.
             properties:
+              clusterConfigurationName:
+                type: string
               scalingLabel:
-                description: ClusterConfigurationName string `json:"clusterConfigurationName"`
                 format: int32
                 type: integer
             required:
+            - clusterConfigurationName
             - scalingLabel
             type: object
           status:

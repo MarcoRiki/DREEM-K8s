@@ -20,6 +20,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type NodeHandlingPhase string
+
+const (
+	NH_PhaseRunning   NodeHandlingPhase = "Running"
+	NH_PhaseCompleted NodeHandlingPhase = "Completed"
+	NH_PhaseFailed    NodeHandlingPhase = "Failed"
+)
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -28,14 +36,14 @@ type NodeHandlingSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Foo is an example field of NodeHandling. Edit nodehandling_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	NodeSelectingName string `json:"nodeSelectingName"`
+	SelectedNode      string `json:"selectedNode"`
+	ScalingLabel      int32  `json:"scalingLabel"`
 }
 
 // NodeHandlingStatus defines the observed state of NodeHandling.
 type NodeHandlingStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	Phase NodeHandlingPhase `json:"phase"`
 }
 
 // +kubebuilder:object:root=true

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-configuration-parameters
+  namespace: dreem
+data:
+  minNodes: "1"
+  maxNodes: "10"

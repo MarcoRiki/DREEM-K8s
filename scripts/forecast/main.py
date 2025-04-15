@@ -1,4 +1,6 @@
 import os
+import random
+import string
 import time
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -28,43 +30,61 @@ def forecast(prometheus_url, rate_interval, time_windows_forecast, time_window_p
             return 0
 
 
-def update_crd(scaling_label):
+def create_cluster_configuration(requiredNodes, min_nodes, max_nodes):
     """
-    The function takes the scaling label (aka the number of nodes to start up or shut down) and update the ClusterConfiguration CRD
+    La funzione crea un'istanza della risorsa ClusterConfiguration (CR) nel cluster Kubernetes.
     """
 
     api = client.CustomObjectsApi()
+    # Check for existing ClusterConfiguration CRs
+    existing_crs = api.list_namespaced_custom_object(
+        group="cluster.dreemk8s",
+        version="v1alpha1",
+        namespace="dreem",
+        plural="clusterconfigurations"
+    )
+
+    for cr in existing_crs.get("items", []):
+        status = cr.get("status", {})
+        phase = status.get("phase", "")
+        if phase != "Completed":
+            logging.info(f"Existing ClusterConfiguration '{cr['metadata']['name']}' is not completed. Skipping creation.")
+            return
 
     group = "cluster.dreemk8s"
-    version = "v1aplha1"
+    version = "v1alpha1"  # Assicurati che sia scritto correttamente
     plural = "clusterconfigurations"
-    namespace = "default"
-    name= "clusterconfiguration-sample"
+    namespace = "dreem"
+    random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    cr_name = f"clusterconfiguration-{random_string}"
+
+    body = {
+        "apiVersion": f"{group}/{version}",
+        "kind": "ClusterConfiguration",
+        "metadata": {
+            "name": cr_name,
+            "namespace": namespace
+        },
+        "spec": {
+            "requiredNodes": int(requiredNodes),
+            "maxNodes": int(max_nodes),
+            "minNodes": int(min_nodes)
+        }
+    }
 
     try:
-        cluster_config = api.get_namespaced_custom_object(
+        api.create_namespaced_custom_object(
             group=group,
             version=version,
             namespace=namespace,
             plural=plural,
-            name=name
+            body=body
         )
-
-        cluster_config["spec"]["scalingLabel"] = scaling_label
-
-        api.patch_namespaced_custom_object(
-            group=group,
-            version=version,
-            namespace=namespace,
-            plural=plural,
-            name=name,
-            body=cluster_config
-        )
-
+        logging.info(f"Nuova istanza di ClusterConfiguration creata con successo: {cr_name}")
     except ApiException as e:
-        logging.error(f"Error during the CRD update: {e}")
+        logging.error(f"Errore durante la creazione dell'istanza di ClusterConfiguration: {e}")
 
-def read_cm():
+def read_forecast_cm():
     """
     The function reads the forecast-parameters ConfigMap and updates the default values
     """
@@ -81,7 +101,7 @@ def read_cm():
     # update the CM if values are present
     v1 = client.CoreV1Api()
     try:
-        config_map = v1.read_namespaced_config_map(name="forecast-parameters", namespace="default")
+        config_map = v1.read_namespaced_config_map(name="forecast-parameters", namespace="dreem")
         cm=config_map.data
         prometheus_url = cm.get("Prometheus_URL", prometheus_url)
         rate_interval = cm.get("Prometheus_rate_interval", rate_interval)
@@ -115,18 +135,65 @@ def load_configuration():
         logging.error(f"Error during configuration loading: {e}")
         raise
 
+
+def read_cluster_configuration_cm():
+    """
+       The function reads the clusterConfiguration-parameters ConfigMap and updates the default values
+       """
+    # set some default values
+    min_nodes=1
+    max_nodes=10
+
+    # update the CM if values are present
+    v1 = client.CoreV1Api()
+    try:
+        config_map = v1.read_namespaced_config_map(name="cluster-configuration-parameters", namespace="dreem")
+        cm = config_map.data
+        min_nodes = cm.get("minNodes", min_nodes)
+        max_nodes = cm.get("MaxNodes", max_nodes)
+
+
+    except client.exceptions.ApiException as e:
+        logging.error(f"Error during the reading of the ConfigMap: {e}")
+        return None
+
+    return min_nodes, max_nodes
+
+
+def get_active_nodes():
+    """
+    The function returns the number of active nodes in the cluster
+    """
+    v1 = client.CoreV1Api()
+    try:
+        nodes = v1.list_node()
+        active_nodes = sum(1 for node in nodes.items if any(
+            condition.type == "Ready" and condition.status == "True" for condition in node.status.conditions))
+        return active_nodes
+    except client.exceptions.ApiException as e:
+        logging.error(f"Error during the retrieval of active nodes: {e}")
+        return 0
+    
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     load_configuration()
 
-    prometheus_url, rate_interval, time_windows_forecast, time_window_prediction, query_step_in_seconds, min_threshold, max_threshold, forecast_period_in_minutes = read_cm()
+    prometheus_url, rate_interval, time_windows_forecast, time_window_prediction, query_step_in_seconds, min_threshold, max_threshold, forecast_period_in_minutes = read_forecast_cm()
+    min_nodes, max_nodes = read_cluster_configuration_cm()
+    active_nodes = get_active_nodes()
+    print("min, max, active " + min_nodes, max_nodes, active_nodes)
 
     while True:
         logging.info("Forecast started")
         scaling_label = forecast(prometheus_url, rate_interval, time_windows_forecast, time_window_prediction, query_step_in_seconds, min_threshold, max_threshold)
-        # update the CRD only if the cluster configuration (aka number of nodes has to be updated)
+        print("scaling:", scaling_label)
+        # create the CRD only if the cluster configuration (aka number of nodes) has to be updated
         if scaling_label != 0:
-            update_crd(scaling_label)
+            required_nodes= active_nodes + scaling_label
+            print("required:" ,required_nodes)
+            create_cluster_configuration(required_nodes, min_nodes, max_nodes)
         time.sleep(forecast_period_in_minutes * 60)
 
 

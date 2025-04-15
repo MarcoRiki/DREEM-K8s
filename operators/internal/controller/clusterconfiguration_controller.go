@@ -58,30 +58,29 @@ func (r *ClusterConfigurationReconciler) getClusterNodes(ctx context.Context) (i
 	return int32(len(nodeList.Items)), nil
 }
 
-func createNodeSelectingCRD(ctx context.Context, r *ClusterConfigurationReconciler, label int32) bool {
+func createNodeSelectingCRD(ctx context.Context, r *ClusterConfigurationReconciler, label int32, ClusterConfigurationName string) bool {
 	log := log.FromContext(ctx)
 
-	// timer of 15 seconds just for testing
-	time.Sleep(25 * time.Second)
+	// timer of 10 seconds just for testing
 	log.Info("Creating the NodeSelecting CRD")
+	time.Sleep(10 * time.Second)
 
 	// create unique identifier for the NodeSelecting CRD
-
 	crdNameBytes := make([]byte, 8)
 	if _, err := rand.Read(crdNameBytes); err != nil {
 		log.Error(err, "unable to generate random name for NodeSelecting CRD")
 		return false
 	}
 	crdName := "node-selecting-" + fmt.Sprintf("%x", crdNameBytes)
-	// create the NodeSelecting CRD
+
 	var nodeSelecting = &clusterv1alpha1.NodeSelecting{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      crdName,
 			Namespace: "dreem",
 		},
 		Spec: clusterv1alpha1.NodeSelectingSpec{
-			//ClusterConfigurationName: "cluster-configuration",
-			ScalingLabel: label,
+			ClusterConfigurationName: ClusterConfigurationName,
+			ScalingLabel:             label,
 		},
 	}
 
@@ -124,100 +123,184 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 
 		clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseStable
 		clusterConfiguration.Status.ActiveNodes = activeNodes
-		clusterConfiguration.Status.LastUpdate = metav1.Now()
-		clusterConfiguration.Status.RequiredNodes = activeNodes
 
 		if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
 			log.Error(err, "unable to update ClusterScaling status")
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
-	}
+	} else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseStable && clusterConfiguration.Status.ActiveNodes != clusterConfiguration.Spec.RequiredNodes {
 
-	if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseStable && clusterConfiguration.Spec.ScalingLabel != 0 {
-		// scale up
-		if clusterConfiguration.Spec.ScalingLabel > 0 {
+		var scalingNodes int32 = 0                                                             // number of nodes to add or remove
+		if clusterConfiguration.Spec.RequiredNodes > clusterConfiguration.Status.ActiveNodes { // SCALE UP
+			maxScalableNodes := min(clusterConfiguration.Spec.RequiredNodes, clusterConfiguration.Spec.MaxNodes)
+			nodeToAdd := maxScalableNodes - clusterConfiguration.Status.ActiveNodes // positive value
 
-			if clusterConfiguration.Status.RequiredNodes+clusterConfiguration.Spec.ScalingLabel > clusterConfiguration.Spec.MaxNodes {
-				log.Info("Scaling up is not fully possible, the number of nodes exceeds the maximum allowed")
-				clusterConfiguration.Status.RequiredNodes = clusterConfiguration.Spec.MaxNodes
-				//conviene creare un campo Note per eventualmente scrivere un messaggio di errore
-			} else if clusterConfiguration.Status.RequiredNodes+clusterConfiguration.Spec.ScalingLabel == clusterConfiguration.Spec.MaxNodes {
-				log.Info("Scaling up is possible, maximum number of nodes reached")
-				clusterConfiguration.Status.RequiredNodes = clusterConfiguration.Status.RequiredNodes + clusterConfiguration.Spec.ScalingLabel
+			if nodeToAdd != 0 {
+				log.Info("Scaling up, number of nodes to add", "nodes", nodeToAdd)
+				scalingNodes = nodeToAdd
+
 			} else {
-				log.Info("Scaling up is possible, scaling in progress")
-				clusterConfiguration.Status.RequiredNodes = clusterConfiguration.Status.RequiredNodes + clusterConfiguration.Spec.ScalingLabel
-			}
-
-		} else if clusterConfiguration.Spec.ScalingLabel < 0 {
-			// scale down
-			if clusterConfiguration.Status.RequiredNodes+clusterConfiguration.Spec.ScalingLabel < clusterConfiguration.Spec.MinNodes {
-				log.Info("Scaling down is not possible, the number of nodes is below the minimum allowed")
-				clusterConfiguration.Status.RequiredNodes = clusterConfiguration.Spec.MinNodes
-			} else if clusterConfiguration.Status.RequiredNodes+clusterConfiguration.Spec.ScalingLabel == clusterConfiguration.Spec.MinNodes {
-				log.Info("Scaling down is possible, minimum number of nodes reached")
-				clusterConfiguration.Status.RequiredNodes = clusterConfiguration.Status.RequiredNodes + clusterConfiguration.Spec.ScalingLabel
-			} else {
-				log.Info("Scaling down is possible, scaling in progress")
-				clusterConfiguration.Status.RequiredNodes = clusterConfiguration.Status.RequiredNodes + clusterConfiguration.Spec.ScalingLabel
-			}
-
-		}
-
-		if createNodeSelectingCRD(ctx, r, clusterConfiguration.Spec.ScalingLabel) {
-
-			clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseSelecting
-		} else {
-			log.Info("Error creating the NodeSelecting CRD")
-			clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseStable
-			// test questa parte perché potrebbe andare in loop
-		}
-
-		if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
-			log.Error(err, "unable to update ClusterScaling status")
-			return ctrl.Result{}, err
-		}
-
-	} else {
-		log.Info("Reconciler started, ClusterConfiguration Status is not Stable")
-		// la label viene aggiornata, però la richiesta viene persa.
-		// sarebbe utile accodare la richiesta per il successivo ciclo di reconciler, quando lo stato è di nuovo stable
-	}
-
-	//Check if there is a NodeSelecting resource associated with the ClusterConfiguration
-	var nodeSelectingList clusterv1alpha1.NodeSelectingList
-	if err := r.Client.List(ctx, &nodeSelectingList, client.InNamespace(req.Namespace)); err != nil {
-		log.Error(err, "unable to list NodeSelecting resources")
-		return ctrl.Result{}, err
-	}
-
-	for _, nodeSelecting := range nodeSelectingList.Items {
-		for _, ownerRef := range nodeSelecting.OwnerReferences {
-			if ownerRef.Kind == "ClusterConfiguration" && ownerRef.Name == clusterConfiguration.Name &&
-				nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseComplete {
-
-				log.Info("NodeSelecting resource with Phase=Completed found", "name", nodeSelecting.Name)
-
-				// Update ClusterConfiguration status
-				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseSwitching
+				log.Info("Scaling up not possible, reached maximum number of physical nodes")
+				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
 
 				if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
-					log.Error(err, "unable to update ClusterConfiguration status")
+					log.Error(err, "unable to update ClusterScaling status")
 					return ctrl.Result{}, err
 				}
+				return ctrl.Result{}, nil
 
-				/*
-					if err := r.Client.Delete(ctx, &nodeSelecting); err != nil {
-						log.Error(err, "unable to delete NodeSelecting resource", "name", nodeSelecting.Name)
-						return ctrl.Result{}, err
-					}*/
+			}
 
-				log.Info("ClusterConfiguration status updated to Switching", "name", nodeSelecting.Name)
-				break
+		} else if clusterConfiguration.Spec.RequiredNodes < clusterConfiguration.Status.ActiveNodes { // SCALE DOWN
+			minScalableNodes := max(clusterConfiguration.Spec.RequiredNodes, clusterConfiguration.Spec.MinNodes)
+			nodeToRemove := minScalableNodes - clusterConfiguration.Status.ActiveNodes // negative value
+
+			if nodeToRemove != 0 {
+				log.Info("Scaling down, number of nodes to remove", "nodes", nodeToRemove)
+				scalingNodes = nodeToRemove
+			} else {
+				log.Info("Scaling down not possible, reached minimum number of physical nodes")
+				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
+				if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+					log.Error(err, "unable to update ClusterScaling status")
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{}, nil
+			}
+
+		} else { // NO SCALE
+			log.Info("No scaling required, the number of nodes is already correct")
+			clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
+
+		}
+
+		if scalingNodes != 0 {
+			if createNodeSelectingCRD(ctx, r, scalingNodes, clusterConfiguration.Name) {
+
+				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseSelecting
+			} else {
+				log.Info("Error creating the NodeSelecting CRD")
+				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseFailed
+
+			}
+
+			if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+				log.Error(err, "unable to update ClusterScaling status")
+				return ctrl.Result{}, err
+			}
+		} else {
+			log.Info("Number of nodes to scale is not valid")
+			clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseFailed
+			if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+				log.Error(err, "unable to update ClusterScaling status")
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+
+	}
+	var nodeSelectingChild clusterv1alpha1.NodeSelecting
+	if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseSelecting {
+		var nodeSelectingList clusterv1alpha1.NodeSelectingList
+		//Check if there is a NodeSelecting resource associated with the ClusterConfiguration
+		if err := r.Client.List(ctx, &nodeSelectingList, client.InNamespace(req.Namespace)); err != nil {
+			log.Error(err, "unable to list NodeSelecting resources")
+			return ctrl.Result{}, err
+		}
+		//var nodeSelectingChild clusterv1alpha1.NodeSelecting
+		for _, nodeSelecting := range nodeSelectingList.Items {
+			for _, ownerRef := range nodeSelecting.OwnerReferences {
+				if ownerRef.Kind == "ClusterConfiguration" && ownerRef.Name == clusterConfiguration.Name {
+
+					nodeSelectingChild = nodeSelecting
+					if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseComplete {
+						log.Info("NodeSelecting resource in Completed Phase found", "name", nodeSelecting.Name)
+
+						clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseSwitching
+
+						if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+							log.Error(err, "unable to update ClusterConfiguration status")
+							return ctrl.Result{}, err
+						}
+						log.Info("ClusterConfiguration status updated to Switching", "name", nodeSelecting.Name)
+
+					} else if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseFailed {
+						log.Info("NodeSelecting resource in Failed Phase found", "name", nodeSelecting.Name)
+						clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseFailed
+
+						if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+							log.Error(err, "unable to update ClusterConfiguration status")
+							return ctrl.Result{}, err
+						}
+						log.Info("ClusterConfiguration status updated to Failed due to NodeSelecting Failing", "name", nodeSelecting.Name)
+
+					}
+
+					break
+				}
 			}
 		}
+
+	}
+
+	if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseSwitching {
+		// check if there is a NodeHandling resource associated with the NodeSelecting in a Completed phase
+		var nodeHandlingList clusterv1alpha1.NodeHandlingList
+		if err := r.Client.List(ctx, &nodeHandlingList, client.InNamespace(req.Namespace)); err != nil {
+			log.Error(err, "unable to list NodeHandling resources")
+			return ctrl.Result{}, err
+		}
+		for _, nodeHandling := range nodeHandlingList.Items {
+			for _, ownerRef := range nodeHandling.OwnerReferences {
+				if ownerRef.Kind == "NodeSelecting" && ownerRef.Name == nodeSelectingChild.Name {
+
+					if nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseCompleted {
+						log.Info("NodeHandling resource in Completed Phase found", "name", nodeHandling.Name)
+						clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
+
+						if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+							log.Error(err, "unable to update ClusterConfiguration status")
+							return ctrl.Result{}, err
+						}
+						log.Info("ClusterConfiguration status updated to Completed", "name", nodeHandling.Name)
+					} else if nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseFailed {
+						log.Info("NodeHandling resource in Failed Phase found", "name", nodeHandling.Name)
+						clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseFailed
+
+						if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+							log.Error(err, "unable to update ClusterConfiguration status")
+							return ctrl.Result{}, err
+						}
+						log.Info("ClusterConfiguration status updated to Failed due to NodeHandling Failing", "name", nodeHandling.Name)
+
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// update status and delete the NodeSelecting (and NodeHandling) resource
+	if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseCompleted {
+		if clusterConfiguration.Status.ActiveNodes != clusterConfiguration.Spec.RequiredNodes {
+			clusterConfiguration.Status.ActiveNodes = clusterConfiguration.Spec.RequiredNodes
+			if err := r.Status().Update(ctx, &clusterConfiguration); err != nil {
+				log.Error(err, "unable to update ClusterConfiguration status")
+				return ctrl.Result{}, err
+			}
+		}
+
+		/*
+			if err := r.Client.Delete(ctx, &nodeSelecting); err != nil {
+				log.Error(err, "unable to delete NodeSelecting resource", "name", nodeSelecting.Name)
+				return ctrl.Result{}, err
+			}*/
+	}
+
+	//handle a max retry: delete the NodeSelecting and NodeHandling resources if they are in a Failed phase, reset the ClusterConfiguration status and update a max retry counter
+	if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseFailed {
+
 	}
 
 	//after the scaling operation with the node handling, the numebr of nodes is updated

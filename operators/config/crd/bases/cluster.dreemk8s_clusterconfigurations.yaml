@@ -46,33 +46,24 @@ spec:
               minNodes:
                 format: int32
                 type: integer
-              scalingLabel:
+              requiredNodes:
                 format: int32
                 type: integer
             required:
             - maxNodes
+            - requiredNodes
             type: object
           status:
             description: ClusterConfigurationStatus defines the observed state of
               ClusterConfiguration.
             properties:
-              RequiredNodes:
-                description: 'Important: Run "make" to regenerate code after modifying
-                  this file'
-                format: int32
-                type: integer
               activeNodes:
                 format: int32
                 type: integer
-              lastUpdate:
-                format: date-time
-                type: string
               phase:
                 type: string
             required:
-            - RequiredNodes
             - activeNodes
-            - lastUpdate
             - phase
             type: object
         type: object

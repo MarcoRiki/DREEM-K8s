@@ -50,9 +50,10 @@ def get_nodes_resource_usage():
         node_name = node['metadata']['name']
         cpu_usage = node['usage']['cpu']
         memory_usage = node['usage']['memory']
-
-        if "control-plane" in node_name:
+        labels = node.get('metadata', {}).get('labels', {})
+        if "node-role.kubernetes.io/control-plane" in labels:
             continue
+
 
         # Convert CPU usage to a numeric value (assuming it's in millicores)
         cpu_usage_number = int(cpu_usage[:-1])  # Remove the last character (e.g., 'n') and convert to int
@@ -67,15 +68,15 @@ def get_nodes_resource_usage():
     return min
 
 
-def scale_up():
-    logger.info("scale UP function started")
+def scale_down():
+    logger.info("scale DOWN function started")
     cpu_min_node = get_nodes_resource_usage()
     return cpu_min_node
 
-def scale_down():
-    logger.info("scale DOWN function started")
+def scale_up():
+    logger.info("scale UP function started")
 
-    return "prova"
+    return "random"
 
 @app.route("/nodes/scaleUp", methods=["GET"])
 def handle_scale_up():

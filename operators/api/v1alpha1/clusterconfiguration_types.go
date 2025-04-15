@@ -27,9 +27,9 @@ import (
 type ClusterConfigurationSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
-	ScalingLabel int32 `json:"scalingLabel,omitempty"` // it can be a positive or negative number
-	MaxNodes     int32 `json:"maxNodes"`
-	MinNodes     int32 `json:"minNodes,omitempty"`
+	RequiredNodes int32 `json:"requiredNodes"`
+	MaxNodes      int32 `json:"maxNodes"`
+	MinNodes      int32 `json:"minNodes,omitempty"`
 }
 
 type ClusterConfigurationPhase string
@@ -38,16 +38,17 @@ const (
 	CC_PhaseStable    ClusterConfigurationPhase = "Stable"
 	CC_PhaseSelecting ClusterConfigurationPhase = "Selecting"
 	CC_PhaseSwitching ClusterConfigurationPhase = "Switching"
+	CC_PhaseCompleted ClusterConfigurationPhase = "Completed"
+	CC_PhaseFailed    ClusterConfigurationPhase = "Failed"
 )
 
 // ClusterConfigurationStatus defines the observed state of ClusterConfiguration.
 type ClusterConfigurationStatus struct {
 
 	// Important: Run "make" to regenerate code after modifying this file
-	RequiredNodes int32                     `json:"RequiredNodes"`
-	ActiveNodes   int32                     `json:"activeNodes"`
-	Phase         ClusterConfigurationPhase `json:"phase"`
-	LastUpdate    metav1.Time               `json:"lastUpdate"`
+
+	ActiveNodes int32                     `json:"activeNodes"`
+	Phase       ClusterConfigurationPhase `json:"phase"`
 }
 
 // +kubebuilder:object:root=true
