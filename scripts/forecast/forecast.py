@@ -11,7 +11,7 @@ import logging
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
 
-token='cH7ysJzIYmtGmZ7Lg1sV3b01B_AjyLV1XgG7RB-mJwCJ42DAUetgANnBvXcXJPVqEkYh3-7lEeSOZEZwe8d-yqfDzLrPTBJRJAMMuBHoYuAe3Rfyy7RDHrQYfS5D|1744705570|Z4QhnHIUVxJAO2oO93SdFeAxiXfNtWJeNc_naHRCNqU='
+token=''
 
 
 def load_data_cpu(prometheus_url, rate_interval, time_windows_forecast, query_step):

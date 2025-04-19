@@ -7,7 +7,7 @@ metadata:
   name: clusterconfiguration-sample
   namespace: dreem
 spec:
-  maxNodes: 4
+  maxNodes: 6
   minNodes: 1
   requiredNodes: 2
 

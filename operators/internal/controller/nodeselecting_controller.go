@@ -22,8 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -84,12 +84,10 @@ func getNodeLabel(ctx context.Context, scalingLabel int32) (string, error) {
 
 }
 
-func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, selectedNode string, NodeSelectingName string, scalingLabel int32) bool {
+func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, selectedNode string, NodeSelectingName string, ClusterConfigurationName string, scalingLabel int32) bool {
 	log := log.FromContext(ctx)
 
-	// timer of 10 seconds just for testing
 	log.Info("Creating the NodeHandling CRD")
-	time.Sleep(10 * time.Second)
 
 	// create unique identifier for the NodeHandling CRD
 	crdNameBytes := make([]byte, 8)
@@ -105,9 +103,10 @@ func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, sele
 			Namespace: "dreem",
 		},
 		Spec: clusterv1alpha1.NodeHandlingSpec{
-			NodeSelectingName: NodeSelectingName,
-			SelectedNode:      selectedNode,
-			ScalingLabel:      scalingLabel,
+			ClusterConfigurationName: ClusterConfigurationName,
+			NodeSelectingName:        NodeSelectingName,
+			SelectedNode:             selectedNode,
+			ScalingLabel:             scalingLabel,
 		},
 	}
 
@@ -144,35 +143,52 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	var nodeSelecting = &clusterv1alpha1.NodeSelecting{}
 	if err := r.Client.Get(ctx, req.NamespacedName, nodeSelecting); err != nil {
-		log.Error(err, "unable to fetch NodeSelecting")
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "unable to fetch NodeSelecting")
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	log.Info("NodeSelecting CRD found", "name", nodeSelecting.Name)
 
 	if nodeSelecting.Status.Phase == "" {
 
-		var clusterConfigurationList clusterv1alpha1.ClusterConfigurationList
-		if err := r.Client.List(ctx, &clusterConfigurationList); err != nil {
-			log.Error(err, "unable to list ClusterConfiguration resources")
-			return ctrl.Result{}, err
-		}
-
-		// find the clusterconfiguration with the name in the spec
-		var clusterConfiguration *clusterv1alpha1.ClusterConfiguration
-		for _, cc := range clusterConfigurationList.Items {
-			if cc.Name == nodeSelecting.Spec.ClusterConfigurationName {
-				clusterConfiguration = &cc
-				break
-			}
-		}
-		if clusterConfiguration == nil {
-			log.Info("Unable to find the ClusterConfiguration parent resource", "name", nodeSelecting.Spec.ClusterConfigurationName)
+		// get clusterconfiguration resource from the name in the spec
+		clusterConfiguration := &clusterv1alpha1.ClusterConfiguration{}
+		if err := r.Client.Get(ctx, client.ObjectKey{
+			Name:      nodeSelecting.Spec.ClusterConfigurationName,
+			Namespace: nodeSelecting.Namespace,
+		}, clusterConfiguration); err != nil {
+			log.Error(err, "unable to find ClusterConfiguration parent resource for NodeSelecting")
 			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
 			if err := r.Status().Update(ctx, nodeSelecting); err != nil {
 				log.Error(err, "unable to update the NodeSelecting status")
 			}
-			return ctrl.Result{}, fmt.Errorf("unable to find the ClusterConfiguration parent resource")
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
+
+		fmt.Println("ClusterConfiguration found", "name", clusterConfiguration.Name)
+
+		// var clusterConfigurationList clusterv1alpha1.ClusterConfigurationList
+		// if err := r.Client.List(ctx, &clusterConfigurationList); err != nil {
+		// 	log.Error(err, "unable to list ClusterConfiguration resources")
+		// 	return ctrl.Result{}, err
+		// }
+
+		// // find the clusterconfiguration with the name in the spec
+		// for _, cc := range clusterConfigurationList.Items {
+		// 	if cc.Name == nodeSelecting.Spec.ClusterConfigurationName {
+		// 		clusterConfiguration = &cc
+		// 		break
+		// 	}
+		// }
+		// if clusterConfiguration == nil {
+		// 	log.Info("Unable to find the ClusterConfiguration parent resource", "name", nodeSelecting.Spec.ClusterConfigurationName)
+		// 	nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
+		// 	if err := r.Status().Update(ctx, nodeSelecting); err != nil {
+		// 		log.Error(err, "unable to update the NodeSelecting status")
+		// 	}
+		// 	return ctrl.Result{}, fmt.Errorf("unable to find the ClusterConfiguration parent resource")
+		// }
 
 		if err := ctrl.SetControllerReference(clusterConfiguration, nodeSelecting, r.Scheme); err != nil {
 			log.Error(err, "unable to set owner reference on NodeSelecting")
@@ -204,7 +220,7 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		log.Info("Node label received", "nodeLabel", nodeLabel)
 
-		if createNodeHandlingCRD(ctx, r, nodeLabel, nodeSelecting.Name, nodeSelecting.Spec.ScalingLabel) {
+		if createNodeHandlingCRD(ctx, r, nodeLabel, nodeSelecting.Name, nodeSelecting.Spec.ClusterConfigurationName, nodeSelecting.Spec.ScalingLabel) {
 			nodeSelecting.Status.SelectedNode = nodeLabel
 			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseComplete
 
@@ -271,6 +287,5 @@ func (r *NodeSelectingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}),
 		).
-		//Owns(&clusterv1alpha1.NodeHandling{}).
 		Complete(r)
 }

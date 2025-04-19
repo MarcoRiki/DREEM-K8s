@@ -35,10 +35,10 @@ const (
 type NodeHandlingSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-
-	NodeSelectingName string `json:"nodeSelectingName"`
-	SelectedNode      string `json:"selectedNode"`
-	ScalingLabel      int32  `json:"scalingLabel"`
+	ClusterConfigurationName string `json:"clusterConfigurationName"`
+	NodeSelectingName        string `json:"nodeSelectingName"`
+	SelectedNode             string `json:"selectedNode"`
+	ScalingLabel             int32  `json:"scalingLabel"`
 }
 
 // NodeHandlingStatus defines the observed state of NodeHandling.

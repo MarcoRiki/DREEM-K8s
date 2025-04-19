@@ -39,6 +39,11 @@ spec:
           spec:
             description: NodeHandlingSpec defines the desired state of NodeHandling.
             properties:
+              clusterConfigurationName:
+                description: |-
+                  INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
+                  Important: Run "make" to regenerate code after modifying this file
+                type: string
               nodeSelectingName:
                 type: string
               scalingLabel:
@@ -47,6 +52,7 @@ spec:
               selectedNode:
                 type: string
             required:
+            - clusterConfigurationName
             - nodeSelectingName
             - scalingLabel
             - selectedNode
