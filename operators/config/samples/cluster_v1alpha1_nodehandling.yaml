@@ -7,4 +7,8 @@ metadata:
   name: nodehandling-sample
   namespace: dreem
 spec:
-  # TODO(user): Add fields here
+  clusterConfigurationName: clusterconfiguration-sample
+  nodeSelectingName: nodeselecting-sample
+  scalingLabel: "-1"
+  selectedNode: capi-md-1-vg72f-mtx7t-qff6d
+  

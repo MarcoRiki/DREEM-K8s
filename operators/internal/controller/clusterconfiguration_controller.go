@@ -106,32 +106,35 @@ func getClusterConfiguration(ctx context.Context, r *ClusterConfigurationReconci
 	return clusterConfiguration, nil
 }
 
+func setScaleUp() {
+
+}
+
+func setScaleDown() {
+}
+func setScaleNo() {
+
+}
+
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	//var clusterConfiguration clusterv1alpha1.ClusterConfiguration
 	clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	//log.Info("ClusterConfiguration instance found", "name", clusterConfiguration.Name)
+	log.Info("ClusterConfiguration instance found", "name", clusterConfiguration.Name)
 
-	// set the initial status of ClusterConfiguration
-	if clusterConfiguration.Status.Phase == "" {
+	switch clusterConfiguration.Status.Phase {
+	case "": // initialize the status subresource
 		log.Info("Setting the initial status of ClusterConfiguration", "status", clusterConfiguration.Status)
 		activeNodes, err := r.getClusterNodes(ctx)
 		if err != nil {
 			log.Error(err, "Error retrieving Nodes to set the initial status")
 			return ctrl.Result{}, err
 		}
-
-		clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-
 		clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseStable
 		clusterConfiguration.Status.ActiveNodes = activeNodes
 
@@ -139,9 +142,9 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 			log.Error(err, "unable to update ClusterScaling status")
 			return ctrl.Result{}, err
 		}
-
-	} else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseStable {
-
+		break
+	case clusterv1alpha1.CC_PhaseStable: // check if a scaling operation is required
+		log.Info("ClusterConfiguration in Stable Phase", "name", clusterConfiguration.Name)
 		var scalingNodes int32 = 0                                                             // number of nodes to add or remove
 		if clusterConfiguration.Spec.RequiredNodes > clusterConfiguration.Status.ActiveNodes { // SCALE UP
 			maxScalableNodes := min(clusterConfiguration.Spec.RequiredNodes, clusterConfiguration.Spec.MaxNodes)
@@ -153,7 +156,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 
 			} else {
 				log.Info("Scaling up not possible, reached maximum number of physical nodes")
-				clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+				//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 				if err != nil {
 					return ctrl.Result{}, err
 				}
@@ -175,7 +178,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 				scalingNodes = nodeToRemove
 			} else {
 				log.Info("Scaling down not possible, reached minimum number of physical nodes")
-				clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+				//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 				if err != nil {
 					return ctrl.Result{}, err
 				}
@@ -189,7 +192,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 
 		} else { // NO SCALE
 			log.Info("No scaling required, the number of nodes is already correct")
-			clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+			//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -206,13 +209,10 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 		if scalingNodes != 0 {
 			err := createNodeSelectingCRD(ctx, r, scalingNodes, clusterConfiguration.Name)
 			if err != nil {
-				log.Info("Error creating the NodeSelecting CRD")
-				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseFailed
-
-			} else {
-				clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseSelecting
-
+				log.Error(err, "unable to create NodeSelecting CRD")
+				return ctrl.Result{}, err
 			}
+			clusterConfiguration.Status.Phase = clusterv1alpha1.CC_PhaseSelecting
 
 			if err := r.Status().Update(ctx, clusterConfiguration); err != nil {
 				log.Error(err, "unable to update ClusterScaling status")
@@ -220,7 +220,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 			}
 		} else {
 			log.Info("Number of nodes to scale is not valid")
-			clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+			//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -233,21 +233,22 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 
 		}
 
-	} else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseSelecting {
+		break
+	case clusterv1alpha1.CC_PhaseSelecting:
 		var nodeSelectingList clusterv1alpha1.NodeSelectingList
 		//Check if there is a NodeSelecting resource associated with the ClusterConfiguration
 		if err := r.Client.List(ctx, &nodeSelectingList, client.InNamespace(req.Namespace)); err != nil {
 			log.Error(err, "unable to list NodeSelecting resources")
 			return ctrl.Result{}, err
 		}
-		//var nodeSelectingChild clusterv1alpha1.NodeSelecting
+
 		for _, nodeSelecting := range nodeSelectingList.Items {
 			for _, ownerRef := range nodeSelecting.OwnerReferences {
 				if ownerRef.Kind == "ClusterConfiguration" && ownerRef.Name == clusterConfiguration.Name {
 
 					if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseComplete {
 						log.Info("NodeSelecting resource in Completed Phase found", "name", nodeSelecting.Name)
-						clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+						//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 						if err != nil {
 							return ctrl.Result{}, err
 						}
@@ -261,7 +262,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 
 					} else if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseFailed {
 						log.Info("NodeSelecting resource in Failed Phase found", "name", nodeSelecting.Name)
-						clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+						//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 						if err != nil {
 							return ctrl.Result{}, err
 						}
@@ -279,9 +280,8 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 				}
 			}
 		}
-
-	} else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseSwitching {
-
+		break
+	case clusterv1alpha1.CC_PhaseSwitching:
 		// check if there is a NodeHandling resource associated with the NodeSelecting in a Completed phase
 		var nodeHandlingList clusterv1alpha1.NodeHandlingList
 		if err := r.Client.List(ctx, &nodeHandlingList, client.InNamespace(req.Namespace)); err != nil {
@@ -294,7 +294,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 
 					if nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseCompleted {
 						log.Info("NodeHandling resource in Completed Phase found", "name", nodeHandling.Name)
-						clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+						//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 						if err != nil {
 							return ctrl.Result{}, err
 						}
@@ -307,7 +307,7 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 						log.Info("ClusterConfiguration status updated to Completed", "name", nodeHandling.Name)
 					} else if nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseFailed {
 						log.Info("NodeHandling resource in Failed Phase found", "name", nodeHandling.Name)
-						clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+						//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 						if err != nil {
 							return ctrl.Result{}, err
 						}
@@ -324,9 +324,10 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 				}
 			}
 		}
-	} else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseCompleted { // update status and delete the NodeSelecting (and NodeHandling) resource
+		break
+	case clusterv1alpha1.CC_PhaseCompleted:
 		if clusterConfiguration.Status.ActiveNodes != clusterConfiguration.Spec.RequiredNodes {
-			clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
+			//clusterConfiguration, err := getClusterConfiguration(ctx, r, req)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -337,16 +338,33 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 				return ctrl.Result{}, err
 			}
 		}
-
-		/*
-			if err := r.Client.Delete(ctx, &nodeSelecting); err != nil {
-				log.Error(err, "unable to delete NodeSelecting resource", "name", nodeSelecting.Name)
-				return ctrl.Result{}, err
-			}*/
-	} else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseFailed {
-		//handle a max retry: delete the NodeSelecting and NodeHandling resources if they are in a Failed phase, reset the ClusterConfiguration status and update a max retry counter
-
+		break
+	case clusterv1alpha1.CC_PhaseFailed:
+		break
+	default:
+		break
 	}
+
+	// // set the initial status of ClusterConfiguration
+	// if clusterConfiguration.Status.Phase == "" {
+
+	// } else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseStable {
+
+	// } else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseSelecting {
+
+	// } else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseSwitching {
+
+	// } else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseCompleted { // update status and delete the NodeSelecting (and NodeHandling) resource
+
+	// 	/*
+	// 		if err := r.Client.Delete(ctx, &nodeSelecting); err != nil {
+	// 			log.Error(err, "unable to delete NodeSelecting resource", "name", nodeSelecting.Name)
+	// 			return ctrl.Result{}, err
+	// 		}*/
+	// } else if clusterConfiguration.Status.Phase == clusterv1alpha1.CC_PhaseFailed {
+	// 	//handle a max retry: delete the NodeSelecting and NodeHandling resources if they are in a Failed phase, reset the ClusterConfiguration status and update a max retry counter
+
+	// }
 
 	return ctrl.Result{}, nil
 }

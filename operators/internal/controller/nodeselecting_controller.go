@@ -18,13 +18,11 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -85,36 +83,36 @@ func getNodeLabel(ctx context.Context, scalingLabel int32) (string, error) {
 }
 
 func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, selectedNode string, NodeSelectingName string, ClusterConfigurationName string, scalingLabel int32) bool {
-	log := log.FromContext(ctx)
+	// log := log.FromContext(ctx)
 
-	log.Info("Creating the NodeHandling CRD")
+	// log.Info("Creating the NodeHandling CRD")
 
-	// create unique identifier for the NodeHandling CRD
-	crdNameBytes := make([]byte, 8)
-	if _, err := rand.Read(crdNameBytes); err != nil {
-		log.Error(err, "unable to generate random name for NodeHandling CRD")
-		return false
-	}
-	crdName := "node-handling-" + fmt.Sprintf("%x", crdNameBytes)
-	// create the NodeHandling CRD
-	var nodeHandling = &clusterv1alpha1.NodeHandling{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      crdName,
-			Namespace: "dreem",
-		},
-		Spec: clusterv1alpha1.NodeHandlingSpec{
-			ClusterConfigurationName: ClusterConfigurationName,
-			NodeSelectingName:        NodeSelectingName,
-			SelectedNode:             selectedNode,
-			ScalingLabel:             scalingLabel,
-		},
-	}
+	// // create unique identifier for the NodeHandling CRD
+	// crdNameBytes := make([]byte, 8)
+	// if _, err := rand.Read(crdNameBytes); err != nil {
+	// 	log.Error(err, "unable to generate random name for NodeHandling CRD")
+	// 	return false
+	// }
+	// crdName := "node-handling-" + fmt.Sprintf("%x", crdNameBytes)
+	// // create the NodeHandling CRD
+	// var nodeHandling = &clusterv1alpha1.NodeHandling{
+	// 	ObjectMeta: metav1.ObjectMeta{
+	// 		Name:      crdName,
+	// 		Namespace: "dreem",
+	// 	},
+	// 	Spec: clusterv1alpha1.NodeHandlingSpec{
+	// 		ClusterConfigurationName: ClusterConfigurationName,
+	// 		NodeSelectingName:        NodeSelectingName,
+	// 		SelectedNode:             selectedNode,
+	// 		ScalingLabel:             scalingLabel,
+	// 	},
+	// }
 
-	if err := r.Client.Create(ctx, nodeHandling); err != nil {
-		log.Error(err, "unable to create NodeHandling CRD")
-		return false
-	}
-	log.Info("NodeHandling CRD created", "name", nodeHandling.Name)
+	// if err := r.Client.Create(ctx, nodeHandling); err != nil {
+	// 	log.Error(err, "unable to create NodeHandling CRD")
+	// 	return false
+	// }
+	// log.Info("NodeHandling CRD created", "name", nodeHandling.Name)
 
 	return true
 }
