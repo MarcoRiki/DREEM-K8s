@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forecast-deployment
+  namespace: dreem
+  labels:
+    app: forecast
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forecast
+  template:
+    metadata:
+      labels:
+        app: forecast
+    spec:
+      containers:
+      - name: forecast
+        image: dreem-forecast:0.0.1

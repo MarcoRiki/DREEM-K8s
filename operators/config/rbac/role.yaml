@@ -5,10 +5,21 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - nodes
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - cluster.dreemk8s
   resources:
   - clusterconfigurations
+  - nodehandling
   - nodehandlings
+  - nodeselecting
   - nodeselectings
   verbs:
   - create
@@ -30,9 +41,34 @@ rules:
   - cluster.dreemk8s
   resources:
   - clusterconfigurations/status
+  - nodehandling/status
   - nodehandlings/status
+  - nodeselecting/status
   - nodeselectings/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machinedeployments
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machinedeployments/status
+  verbs:
+  - get
   - update

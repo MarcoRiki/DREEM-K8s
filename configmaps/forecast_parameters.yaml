@@ -4,11 +4,10 @@ metadata:
   name: forecast-parameters
   namespace: dreem
 data:
-  Prometheus_URL: "https://prometheus.crownlabs.polito.it/"
   Prometheus_rate_interval: "10m"
   Prometheus_time_window_prediction_in_minutes: "60"
   Prometheus_time_window_forecast_in_minutes: "60"
-  Prometheus_query_step: "15s"
+  Prometheus_query_step: "30s"
   Thresholds_min: "50"
   Thresholds_max: "80"
-  Forecast_period_in_minutes: "30"
+  Forecast_period_in_minutes: "10"

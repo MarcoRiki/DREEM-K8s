@@ -184,32 +184,32 @@ spec:
         description: coreDNSImageTag sets the tag for the coreDNS image.
         example: v1.8.5
         type: string
-  - name: podSecurityStandard
-    required: false
-    schema:
-      openAPIV3Schema:
-        properties:
-          audit:
-            default: restricted
-            description: audit sets the level for the audit PodSecurityConfiguration
-              mode. One of privileged, baseline, restricted.
-            type: string
-          enabled:
-            default: true
-            description: enabled enables the patches to enable Pod Security Standard
-              via AdmissionConfiguration.
-            type: boolean
-          enforce:
-            default: baseline
-            description: enforce sets the level for the enforce PodSecurityConfiguration
-              mode. One of privileged, baseline, restricted.
-            type: string
-          warn:
-            default: restricted
-            description: warn sets the level for the warn PodSecurityConfiguration
-              mode. One of privileged, baseline, restricted.
-            type: string
-        type: object
+  # - name: podSecurityStandard
+  #   required: false
+  #   schema:
+  #     openAPIV3Schema:
+  #       properties:
+  #         audit:
+  #           default: restricted
+  #           description: audit sets the level for the audit PodSecurityConfiguration
+  #             mode. One of privileged, baseline, restricted.
+  #           type: string
+  #         enabled:
+  #           default: true
+  #           description: enabled enables the patches to enable Pod Security Standard
+  #             via AdmissionConfiguration.
+  #           type: boolean
+  #         enforce:
+  #           default: baseline
+  #           description: enforce sets the level for the enforce PodSecurityConfiguration
+  #             mode. One of privileged, baseline, restricted.
+  #           type: string
+  #         warn:
+  #           default: restricted
+  #           description: warn sets the level for the warn PodSecurityConfiguration
+  #             mode. One of privileged, baseline, restricted.
+  #           type: string
+  #       type: object
   workers:
     machineDeployments:
     - class: default-worker
@@ -347,12 +347,12 @@ spec:
       value: ""
     - name: coreDNSImageTag
       value: ""
-    - name: podSecurityStandard
-      value:
-        audit: restricted
-        enabled: true
-        enforce: baseline
-        warn: restricted
+    # - name: podSecurityStandard
+    #   value:
+    #     audit: restricted
+    #     enabled: true
+    #     enforce: baseline
+    #     warn: restricted
     version: v1.32.0
     workers:
       machineDeployments:
@@ -362,6 +362,7 @@ spec:
       - class: default-worker
         name: md-1
         replicas: 1
-      - class: default-worker
-        name: md-2
-        replicas: 1
+      # - class: default-worker
+      #   name: md-2
+      #   replicas: 1
+

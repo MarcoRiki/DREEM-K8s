@@ -40,6 +40,7 @@ const (
 	CC_PhaseSwitching ClusterConfigurationPhase = "Switching"
 	CC_PhaseCompleted ClusterConfigurationPhase = "Completed"
 	CC_PhaseFailed    ClusterConfigurationPhase = "Failed"
+	CC_PhaseAborted   ClusterConfigurationPhase = "Aborted"
 )
 
 // ClusterConfigurationStatus defines the observed state of ClusterConfiguration.

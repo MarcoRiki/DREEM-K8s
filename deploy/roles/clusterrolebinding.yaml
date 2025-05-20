@@ -1,0 +1,41 @@
+# clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: machine-reader-binding
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: dreem
+roleRef:
+  kind: ClusterRole
+  name: machine-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dreem-default-read-services
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view  # oppure crea una ClusterRole custom
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: dreem
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dreem-default-node-reader-binding
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: dreem
+roleRef:
+  kind: ClusterRole
+  name: dreem-default-node-reader
+  apiGroup: rbac.authorization.k8s.io

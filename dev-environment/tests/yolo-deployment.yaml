@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yolo-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      run: yolo-server
+  template:
+    metadata:
+      labels:
+        run: yolo-server
+    spec:
+      containers:
+        - name: yolo-server
+          image: stegala/yolo-server:tiny
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+          securityContext:
+            allowPrivilegeEscalation: false
+            # runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: yolo-server
+  labels:
+    run: yolo-server
+spec:
+  type: NodePort
+  ports:
+  - port: 5000
+    protocol: TCP
+  selector:
+    run: yolo-server

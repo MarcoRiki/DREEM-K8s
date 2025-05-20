@@ -4,10 +4,10 @@ metadata:
   labels:
     app.kubernetes.io/name: operators
     app.kubernetes.io/managed-by: kustomize
-  name: clusterconfiguration-sample
+  name: clusterconfiguration-sample1
   namespace: dreem
 spec:
-  maxNodes: 6
+  maxNodes: 7
   minNodes: 1
-  requiredNodes: 2
+  requiredNodes: 3
 

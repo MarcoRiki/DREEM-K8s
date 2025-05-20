@@ -1,0 +1,9 @@
+- job_name: 'federate-scrape'
+  metrics_path: /federate
+  params:
+    match[]:
+      - node_cpu_seconds_total
+      - node_memory_MemAvailable_bytes
+  static_configs:
+    - targets:
+        - 192.168.11.114:30000 #change with the ip of the control-plane node (managed cluster)

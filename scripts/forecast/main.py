@@ -1,11 +1,14 @@
-import os
+
 import random
 import string
 import time
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-from forecast import load_data_cpu, make_future_prediction_cpu
+from forecast import load_data_cpu, basic_prediciton #, make_future_prediction_cpu, make_future_prediction_cpu_LSTM
 import logging
+import utils
+from kubernetes import client, config
+from kubernetes.dynamic import DynamicClient
 
 
 
@@ -15,20 +18,21 @@ def forecast(prometheus_url, rate_interval, time_windows_forecast, time_window_p
     """
 
     df_cpu = load_data_cpu(prometheus_url, rate_interval, time_windows_forecast, query_step_in_seconds)
-    pred_cpu = make_future_prediction_cpu(df_cpu, time_window_prediction, query_step_in_seconds)
-    print(pred_cpu)
+    #pred_cpu = make_future_prediction_cpu(df_cpu, time_window_prediction, query_step_in_seconds)
+    #pred_cpu = make_future_prediction_cpu_LSTM(df_cpu,query_step_in_seconds, time_windows_forecast, time_window_prediction )
+    pred_cpu = basic_prediciton(df_cpu)
+    print("CPU predicted:", pred_cpu)
 
     if pred_cpu > max_threshold:
-        print("return 1")
+
         return 1
     else:
         if pred_cpu < min_threshold:
-            print("return -1")
+
             return -1
         else:
-            print("return 0")
-            return 0
 
+            return 0
 
 def create_cluster_configuration(requiredNodes, min_nodes, max_nodes):
     """
@@ -47,7 +51,7 @@ def create_cluster_configuration(requiredNodes, min_nodes, max_nodes):
     for cr in existing_crs.get("items", []):
         status = cr.get("status", {})
         phase = status.get("phase", "")
-        if phase != "Completed":
+        if phase != "Completed" or phase != "Aborted":
             logging.info(f"Existing ClusterConfiguration '{cr['metadata']['name']}' is not completed. Skipping creation.")
             return
 
@@ -89,7 +93,6 @@ def read_forecast_cm():
     The function reads the forecast-parameters ConfigMap and updates the default values
     """
     # set some default values
-    prometheus_url = 'https://prometheus.crownlabs.polito.it/'
     rate_interval = "10m"
     time_window_forecast_in_minutes = 60
     time_window_prediction_in_minutes = 60
@@ -103,7 +106,6 @@ def read_forecast_cm():
     try:
         config_map = v1.read_namespaced_config_map(name="forecast-parameters", namespace="dreem")
         cm=config_map.data
-        prometheus_url = cm.get("Prometheus_URL", prometheus_url)
         rate_interval = cm.get("Prometheus_rate_interval", rate_interval)
         time_window_forecast_in_minutes = int(
             cm.get("Prometheus_time_window_forecast_in_minutes", time_window_forecast_in_minutes))
@@ -119,22 +121,7 @@ def read_forecast_cm():
         return None
 
 
-    return prometheus_url, rate_interval, time_window_forecast_in_minutes,time_window_prediction_in_minutes, query_step_in_seconds, min_threshold, max_threshold, forecast_period_in_minutes
-
-def load_configuration():
-    """
-    The function loads the Kubernetes configuration
-    """
-    try:
-        # Controlla se siamo in un cluster Kubernetes
-        if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
-            config.load_incluster_config()
-        else:
-            config.load_kube_config()
-    except Exception as e:
-        logging.error(f"Error during configuration loading: {e}")
-        raise
-
+    return  rate_interval, time_window_forecast_in_minutes,time_window_prediction_in_minutes, query_step_in_seconds, min_threshold, max_threshold, forecast_period_in_minutes
 
 def read_cluster_configuration_cm():
     """
@@ -159,28 +146,84 @@ def read_cluster_configuration_cm():
 
     return min_nodes, max_nodes
 
+def get_prometheus_url():
+    service_name= "kind-prometheus-kube-prome-prometheus"
+    namespace = "monitoring"
+    local_conf= utils.load_configuration()
+
+    if local_conf:
+        return "http://localhost:9090/"
+
+    v1 = client.CoreV1Api()
+
+    control_plane_ip = get_control_plane_ip_management_cluster()
+    # Ottieni la porta NodePort del servizio
+    service = v1.read_namespaced_service(name=service_name, namespace=namespace)
+    node_port = None
+    for port in service.spec.ports:
+        if port.node_port:
+            node_port = port.node_port
+            break
+
+    if not node_port:
+        raise Exception("impossible finding Nodeport port")
+
+    return f"http://{control_plane_ip}:{node_port}/"
+
+def get_control_plane_ip_management_cluster():
+    v1 = client.CoreV1Api()
+
+
+    nodes = v1.list_node()
+    control_plane_ip = None
+    for node in nodes.items:
+        labels = node.metadata.labels or {}
+        if "node-role.kubernetes.io/control-plane" in labels or "node-role.kubernetes.io/master" in labels:
+            for addr in node.status.addresses:
+                if addr.type == "InternalIP":
+                    control_plane_ip = addr.address
+                    break
+        if control_plane_ip:
+            break
+
+    if not control_plane_ip:
+        raise Exception("Impossibile trovare l'IP del nodo control-plane")
+
+
+
+    return control_plane_ip
+
 
 def get_active_nodes():
     """
-    The function returns the number of active nodes in the cluster
+    The function returns the number of active machine in the managed cluster, without considering the control-plane
     """
-    v1 = client.CoreV1Api()
-    try:
-        nodes = v1.list_node()
-        active_nodes = sum(1 for node in nodes.items if any(
-            condition.type == "Ready" and condition.status == "True" for condition in node.status.conditions))
-        return active_nodes
-    except client.exceptions.ApiException as e:
-        logging.error(f"Error during the retrieval of active nodes: {e}")
-        return 0
+    k8s_client = client.ApiClient()
+    dyn_client = DynamicClient(k8s_client)
+
+    # Ottieni risorsa Machine
+    machine_resource = dyn_client.resources.get(api_version="cluster.x-k8s.io/v1beta1", kind="Machine")
+    machines = machine_resource.get()
+
+    active_nodes = 0
+    for machine in machines.items:
+        labels = machine.metadata.labels or {}
+
+        # Se NON è control-plane, conta
+        if labels["cluster.x-k8s.io/control-plane"] != "":
+            active_nodes += 1
+
+    return active_nodes
     
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    load_configuration()
+    utils.load_configuration()
 
-    prometheus_url, rate_interval, time_windows_forecast, time_window_prediction, query_step_in_seconds, min_threshold, max_threshold, forecast_period_in_minutes = read_forecast_cm()
+    rate_interval, time_windows_forecast, time_window_prediction, query_step_in_seconds, min_threshold, max_threshold, forecast_period_in_minutes = read_forecast_cm()
+    prometheus_url = get_prometheus_url()
+    print(prometheus_url)
     min_nodes, max_nodes = read_cluster_configuration_cm()
     active_nodes = get_active_nodes()
     print("min, max, active " + min_nodes, max_nodes, active_nodes)

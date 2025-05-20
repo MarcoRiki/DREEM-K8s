@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-selection-deployment
+  namespace: dreem
+  labels:
+    app: node-selection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-selection
+  template:
+    metadata:
+      labels:
+        app: node-selection
+    spec:
+      containers:
+      - name: node-selection
+        image: dreem-selection:0.0.1
+

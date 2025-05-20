@@ -18,21 +18,20 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 )
 
@@ -40,11 +39,66 @@ type Response struct {
 	SelectedNode string `json:"selectedNode"`
 }
 
-var URL = "http://localhost:8000/"
+func getNodeSelectionServerURL(ctx context.Context, r *NodeSelectingReconciler) (string, error) {
+	//log := log.FromContext(ctx)
+
+	// use if you want to test the controller locally
+	return "http://localhost:8000/", nil
+
+	// // get the address of the control plane node of the cluster
+	// nodes := &corev1.NodeList{}
+	// if err := r.Client.List(ctx, nodes); err != nil {
+	// 	log.Error(err, "unable to list nodes")
+	// 	return "", err
+	// }
+
+	// var controlPlaneIP string
+	// for _, node := range nodes.Items {
+	// 	if _, exists := node.Labels["node-role.kubernetes.io/control-plane"]; exists {
+	// 		for _, addr := range node.Status.Addresses {
+	// 			if addr.Type == corev1.NodeInternalIP {
+	// 				controlPlaneIP = addr.Address
+	// 				break
+	// 			}
+	// 		}
+	// 		if controlPlaneIP != "" {
+	// 			break
+	// 		}
+	// 	}
+	// }
+
+	// if controlPlaneIP == "" {
+	// 	log.Error(fmt.Errorf("control-plane node not found"), "unable to determine control-plane IP")
+	// 	return "", fmt.Errorf("unable to determine control-plane IP")
+	// }
+
+	// service := &corev1.Service{}
+	// if err := r.Client.Get(ctx, client.ObjectKey{Namespace: "dreem", Name: "selection-service"}, service); err != nil {
+	// 	log.Error(err, "unable to fetch service")
+	// 	return "", err
+	// }
+
+	// var nodePort int32
+	// for _, port := range service.Spec.Ports {
+	// 	if port.NodePort != 0 {
+	// 		nodePort = port.NodePort
+	// 		break
+	// 	}
+	// }
+
+	// if nodePort == 0 {
+	// 	log.Error(fmt.Errorf("nodePort not found"), "service does not expose a NodePort")
+	// 	return "", fmt.Errorf("service does not expose a NodePort")
+	// }
+
+	// log.Info("Control plane IP and NodePort found", "controlPlaneIP", controlPlaneIP, "nodePort", nodePort)
+	// return fmt.Sprintf("http://%s:%d/", controlPlaneIP, nodePort), nil
+
+}
 
 // get the name of the chosen node (to shut down or scale up) from the server
 // the server is a simple HTTP server that returns a JSON object with the name of the node
-func getNodeLabel(ctx context.Context, scalingLabel int32) (string, error) {
+func getNodeLabel(ctx context.Context, scalingLabel int32, URL string) (string, error) {
 	log := log.FromContext(ctx)
 	url := URL
 	if scalingLabel > 0 {
@@ -82,39 +136,39 @@ func getNodeLabel(ctx context.Context, scalingLabel int32) (string, error) {
 
 }
 
-func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, selectedNode string, NodeSelectingName string, ClusterConfigurationName string, scalingLabel int32) bool {
-	// log := log.FromContext(ctx)
+func createNodeHandlingCRD(ctx context.Context, r *NodeSelectingReconciler, selectedNode string, NodeSelectingName string, ClusterConfigurationName string, scalingLabel int32) error {
+	log := log.FromContext(ctx)
 
-	// log.Info("Creating the NodeHandling CRD")
+	log.Info("Creating the NodeHandling CRD")
 
-	// // create unique identifier for the NodeHandling CRD
-	// crdNameBytes := make([]byte, 8)
-	// if _, err := rand.Read(crdNameBytes); err != nil {
-	// 	log.Error(err, "unable to generate random name for NodeHandling CRD")
-	// 	return false
-	// }
-	// crdName := "node-handling-" + fmt.Sprintf("%x", crdNameBytes)
-	// // create the NodeHandling CRD
-	// var nodeHandling = &clusterv1alpha1.NodeHandling{
-	// 	ObjectMeta: metav1.ObjectMeta{
-	// 		Name:      crdName,
-	// 		Namespace: "dreem",
-	// 	},
-	// 	Spec: clusterv1alpha1.NodeHandlingSpec{
-	// 		ClusterConfigurationName: ClusterConfigurationName,
-	// 		NodeSelectingName:        NodeSelectingName,
-	// 		SelectedNode:             selectedNode,
-	// 		ScalingLabel:             scalingLabel,
-	// 	},
-	// }
+	// create unique identifier for the NodeHandling CRD
+	crdNameBytes := make([]byte, 8)
+	if _, err := rand.Read(crdNameBytes); err != nil {
+		log.Error(err, "unable to generate random name for NodeHandling CRD")
+		return err
+	}
+	crdName := "node-handling-" + fmt.Sprintf("%x", crdNameBytes)
+	// create the NodeHandling CRD
+	var nodeHandling = &clusterv1alpha1.NodeHandling{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crdName,
+			Namespace: "dreem",
+		},
+		Spec: clusterv1alpha1.NodeHandlingSpec{
+			ClusterConfigurationName: ClusterConfigurationName,
+			NodeSelectingName:        NodeSelectingName,
+			SelectedNode:             selectedNode,
+			ScalingLabel:             scalingLabel,
+		},
+	}
 
-	// if err := r.Client.Create(ctx, nodeHandling); err != nil {
-	// 	log.Error(err, "unable to create NodeHandling CRD")
-	// 	return false
-	// }
-	// log.Info("NodeHandling CRD created", "name", nodeHandling.Name)
+	if err := r.Client.Create(ctx, nodeHandling); err != nil {
+		log.Error(err, "unable to create NodeHandling CRD")
+		return err
+	}
+	log.Info("NodeHandling CRD created", "name", nodeHandling.Name)
 
-	return true
+	return nil
 }
 
 // NodeSelectingReconciler reconciles a NodeSelecting object
@@ -127,6 +181,9 @@ type NodeSelectingReconciler struct {
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodeselectings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodeselectings/finalizers,verbs=update
 
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
@@ -138,6 +195,13 @@ type NodeSelectingReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	// retrieve the address of the http server for the node selection
+	URL, err := getNodeSelectionServerURL(ctx, r)
+	if err != nil {
+		log.Error(err, "unable to get the node selection server URL")
+		return ctrl.Result{}, err
+	}
 
 	var nodeSelecting = &clusterv1alpha1.NodeSelecting{}
 	if err := r.Client.Get(ctx, req.NamespacedName, nodeSelecting); err != nil {
@@ -188,6 +252,24 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// 	return ctrl.Result{}, fmt.Errorf("unable to find the ClusterConfiguration parent resource")
 		// }
 
+		//check if exists another NodeSelecting with the same clusterconfiguration
+		nodeSelectingList := &clusterv1alpha1.NodeSelectingList{}
+		if err := r.Client.List(ctx, nodeSelectingList); err != nil {
+			log.Error(err, "unable to list NodeSelecting resources")
+			return ctrl.Result{}, err
+		}
+		for _, ns := range nodeSelectingList.Items {
+			if ns.Name != nodeSelecting.Name && ns.Spec.ClusterConfigurationName == nodeSelecting.Spec.ClusterConfigurationName {
+				log.Info("Another NodeSelecting resource already exists with the same ClusterConfiguration", "name", ns.Name)
+				nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
+				if err := r.Status().Update(ctx, nodeSelecting); err != nil {
+					log.Error(err, "unable to update the NodeSelecting status")
+				}
+				return ctrl.Result{}, fmt.Errorf("another NodeSelecting resource already exists with the same ClusterConfiguration")
+			}
+		}
+		log.Info("No other NodeSelecting resource found with the same ClusterConfiguration")
+
 		if err := ctrl.SetControllerReference(clusterConfiguration, nodeSelecting, r.Scheme); err != nil {
 			log.Error(err, "unable to set owner reference on NodeSelecting")
 			return ctrl.Result{}, err
@@ -206,7 +288,7 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseRunning {
-		nodeLabel, err := getNodeLabel(ctx, nodeSelecting.Spec.ScalingLabel)
+		nodeLabel, err := getNodeLabel(ctx, nodeSelecting.Spec.ScalingLabel, URL)
 		if err != nil {
 			log.Error(err, "unable to get the node label")
 			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
@@ -218,11 +300,22 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		log.Info("Node label received", "nodeLabel", nodeLabel)
 
-		if createNodeHandlingCRD(ctx, r, nodeLabel, nodeSelecting.Name, nodeSelecting.Spec.ClusterConfigurationName, nodeSelecting.Spec.ScalingLabel) {
+		if nodeLabel == "null" {
+			log.Error(fmt.Errorf("node label is null"), "unable to get the node label")
+			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
+			if err := r.Status().Update(ctx, nodeSelecting); err != nil {
+				log.Error(err, "unable to update the NodeSelecting status")
+			}
+			return ctrl.Result{}, fmt.Errorf("node label is null")
+		}
+
+		errorNodeHandling := createNodeHandlingCRD(ctx, r, nodeLabel, nodeSelecting.Name, nodeSelecting.Spec.ClusterConfigurationName, nodeSelecting.Spec.ScalingLabel)
+		if errorNodeHandling == nil {
 			nodeSelecting.Status.SelectedNode = nodeLabel
 			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseComplete
 
 		} else {
+			log.Error(errorNodeHandling, "createNodeHandlingCRD function failed")
 			nodeSelecting.Status.Phase = clusterv1alpha1.NS_PhaseFailed
 		}
 
@@ -230,6 +323,19 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			log.Error(err, "unable to update the NodeSelecting status")
 			return ctrl.Result{}, err
 		}
+	}
+
+	if nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseComplete || nodeSelecting.Status.Phase == clusterv1alpha1.NS_PhaseFailed {
+		//set annotation in clusterconfiguration to tirgger the controller
+		clusterConf := &v1alpha1.ClusterConfiguration{}
+		_ = r.Get(ctx, client.ObjectKey{Namespace: "dreem", Name: nodeSelecting.Spec.ClusterConfigurationName}, clusterConf)
+
+		patch := client.MergeFrom(clusterConf.DeepCopy())
+		if clusterConf.Annotations == nil {
+			clusterConf.Annotations = map[string]string{}
+		}
+		clusterConf.Annotations["cluster.dreemk8s/clusterconfiguration_trigger"] = "NodeSelecting"
+		_ = r.Patch(ctx, clusterConf, patch)
 	}
 
 	return ctrl.Result{}, nil
@@ -240,50 +346,8 @@ func (r *NodeSelectingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clusterv1alpha1.NodeSelecting{}).
 		Named("nodeselecting").
-		Watches(
-			&clusterv1alpha1.NodeSelecting{},
-			handler.EnqueueRequestsFromMapFunc(
-				func(ctx context.Context, obj client.Object) []reconcile.Request {
-					_, ok := obj.(*clusterv1alpha1.NodeSelecting)
-					if !ok {
-						return nil
-					}
-
-					NodeSelectingList := &clusterv1alpha1.NodeSelectingList{}
-					err := r.Client.List(ctx, NodeSelectingList)
-					if err != nil {
-						return nil
-					}
-
-					var requests []reconcile.Request
-					for _, item := range NodeSelectingList.Items {
-
-						requests = append(requests, reconcile.Request{
-							NamespacedName: client.ObjectKey{
-								Name:      item.Name,
-								Namespace: item.Namespace,
-							},
-						})
-
-					}
-					return requests
-				}),
-			builder.WithPredicates(
-				predicate.Funcs{
-					CreateFunc: func(event event.CreateEvent) bool {
-
-						return true
-					},
-					DeleteFunc: func(event event.DeleteEvent) bool {
-						return true
-					},
-					UpdateFunc: func(event event.UpdateEvent) bool {
-						return true
-					},
-					GenericFunc: func(event event.GenericEvent) bool {
-						return false
-					},
-				}),
-		).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 1,
+		}).
 		Complete(r)
 }

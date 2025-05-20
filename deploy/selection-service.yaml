@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: selection-service
+  namespace: dreem
+spec:
+  selector:
+    app: node-selection
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: NodePort

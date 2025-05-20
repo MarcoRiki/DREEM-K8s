@@ -1,0 +1,21 @@
+# role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: dreem
+  name: configmap-reader
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clusterconfig-reader
+  namespace: dreem
+rules:
+  - apiGroups: ["cluster.dreemk8s"]
+    resources: ["clusterconfigurations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]

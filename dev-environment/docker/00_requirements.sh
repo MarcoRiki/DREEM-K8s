@@ -12,7 +12,7 @@ install_kind() {
 
 install_clusterctl() {
   echo "Clusterctl not found. Installing Clusterctl..."
-  curl -Lo clusterctl https://github.com/kubernetes-sigs/cluster-api/releases/download/v0.4.0/clusterctl-linux-amd64
+  curl -Lo clusterctl https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.9.6/clusterctl-linux-amd64
   chmod +x ./clusterctl
   mv ./clusterctl /usr/local/bin/clusterctl
 }

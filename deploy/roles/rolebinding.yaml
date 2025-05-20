@@ -1,0 +1,29 @@
+# rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: configmap-reader-binding
+  namespace: dreem
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: dreem
+roleRef:
+  kind: Role
+  name: configmap-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-clusterconfigs
+  namespace: dreem
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: dreem
+roleRef:
+  kind: Role
+  name: clusterconfig-reader
+  apiGroup: rbac.authorization.k8s.io

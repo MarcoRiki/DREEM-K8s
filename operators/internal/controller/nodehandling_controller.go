@@ -19,18 +19,17 @@ package controller
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/cluster-api/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
@@ -43,178 +42,297 @@ type NodeHandlingReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-func scaleUPCluster(ctx context.Context, dockerEnv string, debugEnv string) bool {
+func scaleUPCluster(ctx context.Context, r *NodeHandlingReconciler) error {
 	log := log.FromContext(ctx)
-	var cfg *rest.Config
-	var err error
-	var clusterClient client.Client
 
-	if dockerEnv == "true" { // GESTISCI IL CLUSTER IN DOCKER DEBUG
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Error(err, "Error getting user home directory")
-			return false
-		}
-
-		kubeconfigPath := filepath.Join(home, ".kube", "kind")
-		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-		if err != nil {
-			log.Error(err, "Error creating kubeconfig")
-			return false
-		}
-		// the maanged Cluster does not have the CAPI scheme registered, so we need to register it manually to handle its resources
-		scheme := runtime.NewScheme()
-		if err := v1beta1.AddToScheme(scheme); err != nil {
-			log.Error(err, "Unable to register capi scheme")
-			return false
-		}
-		clusterClient, err = client.New(cfg, client.Options{Scheme: scheme})
-
-	} else {
-		cfg, err = rest.InClusterConfig()
-		if err != nil {
-			log.Error(err, "Error creating in-cluster config")
-			return false
-		}
-
-		clusterClient, err = client.New(cfg, client.Options{})
-		if err != nil {
-			log.Error(err, "Error creating cluster client")
-			return false
-		}
-	}
-	// get the cluster name
+	// Ottieni il cluster
 	clusterList := &v1beta1.ClusterList{}
-	err = clusterClient.List(ctx, clusterList, &client.ListOptions{})
-	if err != nil {
+	if err := r.Client.List(ctx, clusterList); err != nil {
 		log.Error(err, "Error listing clusters")
-		return false
+		return err
 	}
-	cluster := clusterList.Items[0]
-	log.Info("Found cluster", "name", cluster.Name)
-	idNewNode := len(cluster.Spec.Topology.Workers.MachineDeployments)
-	fmt.Println("---- New Node name md-", idNewNode)
-	// add a new machineDeployment to the cluster
-	newMachineDeployment := v1beta1.MachineDeploymentTopology{
-		Name:     fmt.Sprintf("md-%d", idNewNode),
-		Class:    "default-worker",
-		Replicas: pointer.Int32(1),
+	if len(clusterList.Items) == 0 {
+		return fmt.Errorf("no clusters found")
 	}
-	// add the new machineDeployment to the cluster
+	clusterName := clusterList.Items[0].Name
+	clusterNamespace := clusterList.Items[0].Namespace
+	log.Info("Found cluster", "name", clusterName)
 
-	cluster.Spec.Topology.Workers.MachineDeployments = append(cluster.Spec.Topology.Workers.MachineDeployments, newMachineDeployment)
-	// update the cluster
-	err = clusterClient.Update(ctx, &cluster)
+	cluster := &v1beta1.Cluster{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: clusterNamespace}, cluster); err != nil {
+		log.Error(err, "Error getting Cluster")
+		return err
+	}
+
+	// // Check for existing scale-in-progress annotation
+	// if cluster.Annotations != nil && cluster.Annotations["dreemk8s/scale-in-progress"] == "true" {
+	// 	log.Info("Scale-up already in progress, skipping")
+	// 	return nil
+	// }
+
+	// // Set annotation to signal scale-up in progress
+	// if cluster.Annotations == nil {
+	// 	cluster.Annotations = make(map[string]string)
+	// }
+	// cluster.Annotations["dreemk8s/scale-in-progress"] = "true"
+
+	// // Update cluster with annotation
+	// if err := r.Client.Update(ctx, cluster); err != nil {
+	// 	log.Error(err, "Failed to update cluster with scale-in-progress annotation")
+	// 	return err
+	// }
+
+	var newMdName string
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Ricarica SEMPRE una nuova copia del cluster all'interno del retry
+		cluster := &v1beta1.Cluster{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: clusterNamespace}, cluster); err != nil {
+			log.Error(err, "Failed to get latest version of Cluster")
+			return err
+		}
+
+		// Calcola un nuovo nome disponibile
+		existingNames := make(map[string]bool)
+		prefix := strings.Split(cluster.Spec.Topology.Workers.MachineDeployments[0].Name, "-")[0]
+
+		for _, md := range cluster.Spec.Topology.Workers.MachineDeployments {
+			existingNames[md.Name] = true
+		}
+
+		for i := 0; ; i++ {
+			candidate := fmt.Sprintf("%s-%d", prefix, i)
+			if !existingNames[candidate] {
+				newMdName = candidate
+				break
+			}
+		}
+
+		// Aggiunge il nuovo MachineDeployment
+		cluster.Spec.Topology.Workers.MachineDeployments = append(
+			cluster.Spec.Topology.Workers.MachineDeployments,
+			v1beta1.MachineDeploymentTopology{
+				Name:     newMdName,
+				Class:    "default-worker",
+				Replicas: pointer.Int32(1),
+			},
+		)
+
+		// Prova ad aggiornare
+		if err := r.Client.Update(ctx, cluster); err != nil {
+			log.Info("Conflict during cluster update, retrying...", "err", err)
+			return err // verrà ritentato automaticamente
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		log.Error(err, "Error updating cluster")
-		return false
+		return err
 	}
 
-	return true
+	// Attendi che il nuovo MachineDeployment venga effettivamente creato
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	pollInterval := 10 * time.Second
+	expectedSubstring := fmt.Sprintf("%s-%s-", clusterName, newMdName)
+
+	err = wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
+		mdList := &v1beta1.MachineDeploymentList{}
+		err := r.Client.List(ctx, mdList, &client.ListOptions{Namespace: clusterNamespace})
+		if err != nil {
+			log.Error(err, "Error listing MachineDeployments")
+			return false, err
+		}
+
+		for _, md := range mdList.Items {
+			if strings.Contains(md.Name, expectedSubstring) {
+				if md.Status.ReadyReplicas == 1 {
+					log.Info("MachineDeployment created successfully", "name", md.Name)
+
+					// Rimuovi l'annotazione di scale-in-progress
+					err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+						cluster := &v1beta1.Cluster{}
+						if err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: clusterNamespace}, cluster); err != nil {
+							return err
+						}
+
+						// if cluster.Annotations != nil {
+						// 	delete(cluster.Annotations, "dreemk8s/scale-in-progress")
+						// }
+
+						return r.Client.Update(ctx, cluster)
+					})
+					if err != nil {
+						log.Error(err, "Failed to remove scale-in-progress annotation")
+
+					}
+
+					return true, nil
+				}
+
+			}
+		}
+
+		log.Info("Waiting for MachineDeployment with substring", "substring", expectedSubstring)
+		return false, nil
+	})
+	if err != nil {
+		log.Error(err, "Timed out waiting for MachineDeployment creation")
+		return err
+	}
+
+	return nil
 }
 
-func scaleDownCluster(ctx context.Context, dockerEnv string, debugEnv string, seletedNode string) bool {
+func scaleDownCluster(ctx context.Context, selectedNode string, r *NodeHandlingReconciler) error {
 	log := log.FromContext(ctx)
 
-	var cfg *rest.Config
-	var err error
-	var clusterClient client.Client
-
-	if dockerEnv == "true" { // GESTISCI IL CLUSTER IN DOCKER DEBUG
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Error(err, "Error getting user home directory")
-			return false
-		}
-
-		kubeconfigPath := filepath.Join(home, ".kube", "kind")
-		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-		if err != nil {
-			log.Error(err, "Error creating kubeconfig")
-			return false
-		}
-		// the maanged Cluster does not have the CAPI scheme registered, so we need to register it manually to handle its resources
-		scheme := runtime.NewScheme()
-		if err := v1beta1.AddToScheme(scheme); err != nil {
-			log.Error(err, "Unable to register capi scheme")
-			return false
-		}
-		clusterClient, err = client.New(cfg, client.Options{Scheme: scheme})
-
-	} else {
-		cfg, err = rest.InClusterConfig()
-		if err != nil {
-			log.Error(err, "Error creating in-cluster config")
-			return false
-		}
-
-		clusterClient, err = client.New(cfg, client.Options{})
-		if err != nil {
-			log.Error(err, "Error creating cluster client")
-			return false
-		}
-	}
-
-	// get the cluster name
+	// Get the cluster name
 	clusterList := &v1beta1.ClusterList{}
-	err = clusterClient.List(ctx, clusterList, &client.ListOptions{})
-	if err != nil {
+	if err := r.Client.List(ctx, clusterList); err != nil {
 		log.Error(err, "Error listing clusters")
-		return false
+		return err
 	}
-	cluster := clusterList.Items[0]
-	log.Info("Found cluster", "name", cluster.Name)
+	if len(clusterList.Items) == 0 {
+		return fmt.Errorf("no clusters found")
+	}
+	clusterName := clusterList.Items[0].Name
+	clusterNamespace := clusterList.Items[0].Namespace
+	log.Info("Found cluster", "name", clusterName)
 
-	//get the name of the machineDeployment to remove
-	namespace := "default"
-	var machineDeploymentName string
+	cluster := &v1beta1.Cluster{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: clusterNamespace}, cluster); err != nil {
+		log.Error(err, "Error getting Cluster")
+		return err
+	}
 
+	// Check for existing scale-in-progress annotation
+	if cluster.Annotations != nil && cluster.Annotations["dreemk8s/scale-in-progress"] == "true" {
+		log.Info("Scale-up already in progress, skipping")
+		return nil
+	}
+
+	// Set annotation to signal scale-up in progress
+	if cluster.Annotations == nil {
+		cluster.Annotations = make(map[string]string)
+	}
+	cluster.Annotations["dreemk8s/scale-in-progress"] = "true"
+
+	// Update cluster with annotation
+	if err := r.Client.Update(ctx, cluster); err != nil {
+		log.Error(err, "Failed to update cluster with scale-in-progress annotation")
+		return err
+	}
+
+	// Find MachineDeployment
 	mdList := &v1beta1.MachineDeploymentList{}
-	err = clusterClient.List(ctx, mdList, &client.ListOptions{Namespace: ""})
-	if err != nil {
+	if err := r.Client.List(ctx, mdList); err != nil {
 		log.Error(err, "Error listing MachineDeployments")
-		return false
+		return err
 	}
 
+	var machineDeploymentName string
 	for _, md := range mdList.Items {
-		if strings.Contains(seletedNode, md.Name) {
+		if strings.Contains(selectedNode, md.Name) {
 			log.Info("Found MachineDeployment", "name", md.Name)
 			machineDeploymentName = md.Name
 			break
 		}
 	}
-
-	md := &v1beta1.MachineDeployment{}
-	err = clusterClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: namespace}, md)
-	if err != nil {
-		log.Error(err, "Error getting MachineDeployment")
-		return false
+	if machineDeploymentName == "" {
+		return fmt.Errorf("no MachineDeployment matched with selected node")
 	}
 
-	// get the topology of the cluster
-	//fmt.Println("----MachineDepName:", machineDeploymentName)
-	newDeployment := []v1beta1.MachineDeploymentTopology{}
-	for _, md := range cluster.Spec.Topology.Workers.MachineDeployments {
-		//fmt.Println("--MachineDeployment:", md.Name)
-
-		if !strings.Contains(machineDeploymentName, md.Name) {
-			newDeployment = append(newDeployment, md)
+	// Riprova in caso di conflict
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cluster := &v1beta1.Cluster{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: clusterNamespace}, cluster); err != nil {
+			log.Error(err, "Error getting Cluster")
+			return err
 		}
-	}
-	cluster.Spec.Topology.Workers.MachineDeployments = newDeployment
 
-	// update the cluster
-	err = clusterClient.Update(ctx, &cluster)
+		// Aggiorna Topology rimuovendo il MachineDeployment
+		newDeployment := []v1beta1.MachineDeploymentTopology{}
+		for _, md := range cluster.Spec.Topology.Workers.MachineDeployments {
+			if !strings.Contains(machineDeploymentName, md.Name) {
+				newDeployment = append(newDeployment, md)
+			}
+		}
+		cluster.Spec.Topology.Workers.MachineDeployments = newDeployment
+
+		if err := r.Client.Update(ctx, cluster); err != nil {
+			log.Error(err, "Error updating cluster")
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		log.Error(err, "Error updating cluster")
-		return false
+		return err
 	}
-	return true
+
+	// Attendi che il MachineDeployment venga effettivamente rimosso
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	pollInterval := 10 * time.Second
+	err = wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
+		md := &v1beta1.MachineDeployment{}
+		err := r.Client.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: clusterNamespace}, md)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("MachineDeployment successfully removed", "name", machineDeploymentName)
+
+				// Rimuovi l'annotazione di scale-in-progress
+				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					cluster := &v1beta1.Cluster{}
+					if err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: clusterNamespace}, cluster); err != nil {
+						return err
+					}
+
+					if cluster.Annotations != nil {
+						delete(cluster.Annotations, "dreemk8s/scale-in-progress")
+					}
+
+					return r.Client.Update(ctx, cluster)
+				})
+				return true, nil
+			}
+			return false, err
+		}
+		log.Info("Waiting for MachineDeployment to be removed", "name", machineDeploymentName)
+		return false, nil
+	})
+	if err != nil {
+		log.Error(err, "Timed out waiting for MachineDeployment removal")
+		return err
+	}
+
+	return nil
+}
+
+func getAssociatedClusterConfiguration(ctx context.Context, nodeHandling *clusterv1alpha1.NodeHandling, r *NodeHandlingReconciler) (*clusterv1alpha1.ClusterConfiguration, error) {
+	log := log.FromContext(ctx)
+	clusterConfiguration := &clusterv1alpha1.ClusterConfiguration{}
+	if err := r.Client.Get(ctx, client.ObjectKey{
+		Name:      nodeHandling.Spec.ClusterConfigurationName,
+		Namespace: nodeHandling.Namespace,
+	}, clusterConfiguration); err != nil {
+		log.Error(err, "unable to find ClusterConfiguration parent resource for NodeHandling")
+		return nil, err
+	}
+
+	return clusterConfiguration, nil
+
 }
 
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandlings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandlings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandlings/finalizers,verbs=update
+
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments/status,verbs=get;update
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -245,19 +363,32 @@ func (r *NodeHandlingReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{}, err
 		}
 		// get the clusterconfiguration resource from the name in the spec
-		clusterConfiguration := &clusterv1alpha1.ClusterConfiguration{}
-		if err := r.Client.Get(ctx, client.ObjectKey{
-			Name:      nodeHandling.Spec.ClusterConfigurationName,
-			Namespace: nodeHandling.Namespace,
-		}, clusterConfiguration); err != nil {
-			log.Error(err, "unable to find ClusterConfiguration parent resource for NodeSelecting")
+		clusterConfiguration, err := getAssociatedClusterConfiguration(ctx, nodeHandling, r)
+		if err != nil {
+			log.Error(err, "unable to find ClusterConfiguration parent resource for NodeHandling")
 			nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
 			if err := r.Status().Update(ctx, nodeHandling); err != nil {
-				log.Error(err, "unable to update the NodeSelecting status")
+				log.Error(err, "unable to update the NodeHandling status")
 			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
-		//fmt.Println("ClusterConfiguration for NH:", "name", clusterConfiguration.Name)
+
+		// check if another NodeHandling exists with the same ClusterConfiguration
+		nodeHandlingList := &clusterv1alpha1.NodeHandlingList{}
+		if err := r.Client.List(ctx, nodeHandlingList, client.InNamespace(nodeHandling.Namespace)); err != nil {
+			log.Error(err, "unable to list NodeHandling")
+			return ctrl.Result{}, err
+		}
+		for _, nh := range nodeHandlingList.Items {
+			if nh.Name != nodeHandling.Name && nh.Spec.ClusterConfigurationName == nodeHandling.Spec.ClusterConfigurationName {
+				log.Info("Another NodeHandling CRD already exists for this ClusterConfiguration")
+				nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
+				if err := r.Status().Update(ctx, nodeHandling); err != nil {
+					log.Error(err, "unable to update the NodeHandling status")
+				}
+				return ctrl.Result{}, fmt.Errorf("another NodeHandling CRD already exists for this ClusterConfiguration")
+			}
+		}
 
 		if err := ctrl.SetControllerReference(clusterConfiguration, nodeHandling, r.Scheme); err != nil {
 			log.Error(err, "unable to set owner reference ClusterConfiguration on NodeHandling")
@@ -273,31 +404,14 @@ func (r *NodeHandlingReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseRunning {
-		dockerEnv := os.Getenv("DREEM_DOCKER")
-		debugEnv := os.Getenv("DREEM_DEBUG")
-
-		if dockerEnv == "true" {
-			if debugEnv == "true" {
-				log.Info("DREEM_DOCKER and DREEM_DEBUG environment variables are set, using docker environment in debug")
-			} else {
-				log.Info("DREEM_DOCKER environment variable is set, using docker environment")
-			}
-
-		}
 
 		if nodeHandling.Spec.ScalingLabel > 0 {
 			log.Info("NodeHandling is asking the cluster to scale UP")
-			if scaleUPCluster(ctx, dockerEnv, debugEnv) {
-				var latest clusterv1alpha1.NodeHandling // CHIEDI STA ROBA
-				if err := r.Get(ctx, types.NamespacedName{
-					Name:      nodeHandling.Name,
-					Namespace: nodeHandling.Namespace,
-				}, &latest); err != nil {
-					log.Error(err, "unable to re-fetch NodeHandling before status update")
-					return ctrl.Result{}, err
-				}
-				latest.Status.Phase = clusterv1alpha1.NH_PhaseCompleted
-				if err := r.Status().Update(ctx, &latest); err != nil {
+			errorScaleUp := scaleUPCluster(ctx, r)
+			if errorScaleUp == nil {
+
+				nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseCompleted
+				if err := r.Status().Update(ctx, nodeHandling); err != nil {
 					log.Error(err, "unable to update the NodeHandling status")
 					return ctrl.Result{}, err
 				}
@@ -305,7 +419,7 @@ func (r *NodeHandlingReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				log.Info("Cluster scaled up successfully")
 				return ctrl.Result{}, nil
 			} else {
-				log.Info("Error scaling up the cluster")
+				log.Error(errorScaleUp, "ScaleUPCluster function failed")
 				nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
 				if err := r.Status().Update(ctx, nodeHandling); err != nil {
 					log.Error(err, "unable to update the NodeHandling status")
@@ -314,25 +428,18 @@ func (r *NodeHandlingReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		} else if nodeHandling.Spec.ScalingLabel < 0 {
 			log.Info("NodeHandling is asking the cluster to scale DOWN")
-			if scaleDownCluster(ctx, dockerEnv, debugEnv, nodeHandling.Spec.SelectedNode) {
-				var latest clusterv1alpha1.NodeHandling // CHIEDI STA ROBA
-				if err := r.Get(ctx, types.NamespacedName{
-					Name:      nodeHandling.Name,
-					Namespace: nodeHandling.Namespace,
-				}, &latest); err != nil {
-					log.Error(err, "unable to re-fetch NodeHandling before status update")
-					return ctrl.Result{}, err
-				}
-				latest.Status.Phase = clusterv1alpha1.NH_PhaseCompleted
-				if err := r.Status().Update(ctx, &latest); err != nil {
+			errorScaleDown := scaleDownCluster(ctx, nodeHandling.Spec.SelectedNode, r)
+			if errorScaleDown == nil {
+
+				nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseCompleted
+				if err := r.Status().Update(ctx, nodeHandling); err != nil {
 					log.Error(err, "unable to update the NodeHandling status")
 					return ctrl.Result{}, err
 				}
-
 				log.Info("Cluster scaled down successfully")
 				return ctrl.Result{}, nil
 			} else {
-				log.Info("Error scaling down the cluster")
+				log.Error(errorScaleDown, "ScaleDownCluster function failed")
 				nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
 				if err := r.Status().Update(ctx, nodeHandling); err != nil {
 					log.Error(err, "unable to update the NodeHandling status")
@@ -343,6 +450,26 @@ func (r *NodeHandlingReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	}
 
+	if nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseCompleted || nodeHandling.Status.Phase == clusterv1alpha1.NH_PhaseFailed {
+		clusterConfiguration, err := getAssociatedClusterConfiguration(ctx, nodeHandling, r)
+		if err != nil {
+			log.Error(err, "unable to find ClusterConfiguration parent resource for NodeHandling")
+			nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
+			if err := r.Status().Update(ctx, nodeHandling); err != nil {
+				log.Error(err, "unable to update the NodeHandling status")
+			}
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		patch := client.MergeFrom(clusterConfiguration.DeepCopy())
+		if clusterConfiguration.Annotations == nil {
+			clusterConfiguration.Annotations = map[string]string{}
+		}
+		clusterConfiguration.Annotations["cluster.dreemk8s/clusterconfiguration_trigger"] = "NodeHandling"
+		_ = r.Patch(ctx, clusterConfiguration, patch)
+
+		return ctrl.Result{}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -351,5 +478,8 @@ func (r *NodeHandlingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clusterv1alpha1.NodeHandling{}).
 		Named("nodehandling").
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 1,
+		}).
 		Complete(r)
 }
