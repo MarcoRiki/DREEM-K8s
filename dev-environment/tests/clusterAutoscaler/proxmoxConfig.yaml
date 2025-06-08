@@ -139,12 +139,24 @@ kind: MachineDeployment
 metadata:
   name: mmiracapillodreemmd-0
   namespace: default
+  labels:
+    cluster.x-k8s.io/cluster-name: dreem-mmiracapillo-cluster
+  annotations:
+    cluster.x-k8s.io/cluster-name: dreem-mmiracapillo-cluster
+    cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size: "1"
+    cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size: "4"
+    cluster.x-k8s.io/autoscaling-options-scaledownutilizationthreshold: "0.5"
+    cluster.x-k8s.io/autoscaling-options-scaleupcpuutilizationthreshold: "0.75"
 spec:
   clusterName: dreem-mmiracapillo-cluster
-  replicas: 1
   selector:
-    matchLabels: null
+    matchLabels:
+      cluster.x-k8s.io/deployment-name: mmiracapillodreemmd-0
   template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/deployment-name: mmiracapillodreemmd-0
+        cluster.x-k8s.io/cluster-name: dreem-mmiracapillo-cluster
     spec:
       bootstrap:
         configRef:
@@ -158,30 +170,7 @@ spec:
         name: worker-template
       version: v1.32.0
 
----
-apiVersion: cluster.x-k8s.io/v1beta1
-kind: MachineDeployment
-metadata:
-  name: mmiracapillodreemmd-1
-  namespace: default
-spec:
-  clusterName: dreem-mmiracapillo-cluster
-  replicas: 1
-  selector:
-    matchLabels: null
-  template:
-    spec:
-      bootstrap:
-        configRef:
-          apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
-          kind: TalosConfigTemplate
-          name: talosconfig-workers
-      clusterName: dreem-mmiracapillo-cluster
-      infrastructureRef:
-        apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
-        kind: ProxmoxMachineTemplate
-        name: worker-template
-      version: v1.32.0
+
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: ProxmoxMachineTemplate

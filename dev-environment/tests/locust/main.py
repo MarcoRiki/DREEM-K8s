@@ -12,6 +12,9 @@ frame_bytes = BytesIO(frame_encoded)
 class MyUser(HttpUser):
     wait_time = between(1, 2)
 
+    def on_start(self):
+        # Override della sessione con timeout predefinito
+        self.client.timeout = 10
     @task
     def index(self):
         self.client.post("/process_frames", files={'frames': ('frame.jpg', frame_bytes.getvalue(), 'image/jpeg')})
@@ -53,25 +56,46 @@ class MyUser(HttpUser):
 #
 #         # Mantieni il numero corrente di utenti
 #         return (self.current_users, 1)
-class SinusoidalShape(LoadTestShape):
+# class SinusoidalShape(LoadTestShape):
+#     """
+#     Carico a sinusoide:
+#     - base_users: numero medio di utenti
+#     - amplitude: ampiezza della sinusoide (max variazione)
+#     - period: durata del ciclo completo in secondi
+#     """
+#     base_users = 20
+#     amplitude = 20
+#     period = 5*60  # un'onda ogni 60 secondi
+#     spawn_rate = 1  # utenti al secondo
+#
+#     def tick(self):
+#         run_time = self.get_run_time()
+#
+#         # Calcolo utenti attuali con funzione seno
+#         user_count = self.base_users + self.amplitude * math.sin(2 * math.pi * run_time / self.period)
+#
+#         # Assicura che non ci siano utenti negativi
+#         user_count = max(0, int(user_count))
+#
+#         return (user_count, self.spawn_rate)
+
+class SinusoidalExpShape(LoadTestShape):
     """
-    Carico a sinusoide:
-    - base_users: numero medio di utenti
-    - amplitude: ampiezza della sinusoide (max variazione)
-    - period: durata del ciclo completo in secondi
+    Sinusoide con ampiezza crescente esponenzialmente.
     """
-    base_users = 50
-    amplitude = 35
-    period = 3*60  # un'onda ogni 60 secondi
-    spawn_rate = 2  # utenti al secondo
+    base_users = 80
+    amplitude = 70           # ampiezza massima
+    period = 25*60              # durata ciclo sinusoide (secondi)
+    spawn_rate = 2           # utenti al secondo
+    growth_factor = 20*60      # in secondi, tempo per "stabilizzarsi"
 
     def tick(self):
         run_time = self.get_run_time()
 
-        # Calcolo utenti attuali con funzione seno
-        user_count = self.base_users + self.amplitude * math.sin(2 * math.pi * run_time / self.period)
+        # Ampiezza crescente nel tempo
+        amp = self.amplitude * (1 - math.exp(-run_time / self.growth_factor))
 
-        # Assicura che non ci siano utenti negativi
-        user_count = max(0, int(user_count))
+        # Sinusoide modulata
+        user_count = self.base_users + amp * math.sin(2 * math.pi * run_time / self.period)
 
-        return (user_count, self.spawn_rate)
+        return (max(0, int(user_count)), self.spawn_rate)

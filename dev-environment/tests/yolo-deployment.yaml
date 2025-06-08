@@ -12,6 +12,25 @@ spec:
       labels:
         run: yolo-server
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: run
+                  operator: In
+                  values:
+                  - yolo-server
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              run: yolo-server
       containers:
         - name: yolo-server
           image: stegala/yolo-server:tiny
@@ -25,6 +44,14 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "512m"
+            limits:
+              memory: "2048Mi"
+              cpu: "1750m"
+ 
 
 ---
 apiVersion: v1

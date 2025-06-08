@@ -9,5 +9,5 @@ data:
   Prometheus_time_window_forecast_in_minutes: "60"
   Prometheus_query_step: "30s"
   Thresholds_min: "50"
-  Thresholds_max: "80"
-  Forecast_period_in_minutes: "10"
+  Thresholds_max: "75"
+  Forecast_period_in_minutes: "5"

@@ -358,11 +358,9 @@ spec:
       machineDeployments:
       - class: default-worker
         name: md-0
-        replicas: 1
-      - class: default-worker
-        name: md-1
-        replicas: 1
-      # - class: default-worker
-      #   name: md-2
       #   replicas: 1
+      # - class: default-worker
+      #   name: md-1
+      #   replicas: 1
+
 

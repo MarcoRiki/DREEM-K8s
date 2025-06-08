@@ -5,4 +5,4 @@ metadata:
   namespace: dreem
 data:
   minNodes: "1"
-  maxNodes: "10"
+  maxNodes: "5"

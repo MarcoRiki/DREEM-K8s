@@ -51,7 +51,8 @@ def create_cluster_configuration(requiredNodes, min_nodes, max_nodes):
     for cr in existing_crs.get("items", []):
         status = cr.get("status", {})
         phase = status.get("phase", "")
-        if phase != "Completed" or phase != "Aborted":
+        #print(phase)
+        if phase not in ["Completed", "Aborted"]:
             logging.info(f"Existing ClusterConfiguration '{cr['metadata']['name']}' is not completed. Skipping creation.")
             return
 
@@ -225,10 +226,11 @@ def main():
     prometheus_url = get_prometheus_url()
     print(prometheus_url)
     min_nodes, max_nodes = read_cluster_configuration_cm()
-    active_nodes = get_active_nodes()
-    print("min, max, active " + min_nodes, max_nodes, active_nodes)
+
 
     while True:
+        active_nodes = get_active_nodes()
+        print("min, max, active " + min_nodes, max_nodes, active_nodes)
         logging.info("Forecast started")
         scaling_label = forecast(prometheus_url, rate_interval, time_windows_forecast, time_window_prediction, query_step_in_seconds, min_threshold, max_threshold)
         print("scaling:", scaling_label)
@@ -237,7 +239,7 @@ def main():
             required_nodes= active_nodes + scaling_label
             print("required:" ,required_nodes)
             create_cluster_configuration(required_nodes, min_nodes, max_nodes)
-        time.sleep(forecast_period_in_minutes * 60)
+        time.sleep(5 * 60)
 
 
 if __name__ == "__main__":

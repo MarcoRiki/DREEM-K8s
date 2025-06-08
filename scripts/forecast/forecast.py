@@ -18,7 +18,7 @@ import utils
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
 
-token='i2hJqTcIBa4i7hTRrg5rsCGXEEz3FDmEFqusXqZbGAHkV80tpRWozZG87QaMVmS4E_KJTmgZTba8HZio0h_RUJsD5QFefF4WCJil0EFvRaElJ1q3s9FAzZfHDrJw|1745678673|4AcS9saCuo46pY7T1k3BfobkO5kr7gyVwb69vrvpQP0='
+#token='i2hJqTcIBa4i7hTRrg5rsCGXEEz3FDmEFqusXqZbGAHkV80tpRWozZG87QaMVmS4E_KJTmgZTba8HZio0h_RUJsD5QFefF4WCJil0EFvRaElJ1q3s9FAzZfHDrJw|1745678673|4AcS9saCuo46pY7T1k3BfobkO5kr7gyVwb69vrvpQP0='
 
 def get_control_plane_ip():
     utils.load_configuration()
@@ -54,8 +54,9 @@ def load_data_cpu(prometheus_url, rate_interval, time_windows_forecast, query_st
     """
     logger.info("loading CPU data to make prediction")
     control_plane_ip = get_control_plane_ip()
+    print("CP ip: ", control_plane_ip)
     cpu_query_test = '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[' + rate_interval + '])))'  # GET the CPU usage for the entire cluster
-    cpu_query = '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle", exported_instance=~"'+control_plane_ip+':9100"}[' + rate_interval + '])))'
+    cpu_query = '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle", exported_instance!~"'+control_plane_ip+':9100", exported_job="node-exporter"}[2m])))'
     #prom_client = PrometheusConnect(url=prometheus_url, disable_ssl=True, headers={"Cookie": "_oauth2_proxy=" + token})
     prom_client = PrometheusConnect(url=prometheus_url, disable_ssl=True)
     end_time = datetime.datetime.now()
@@ -148,8 +149,14 @@ def make_future_prediction_cpu_LSTM(df,query_step,TIME_WINDOW_FORECAST_IN_MINUTE
 #     return prediction.mean()
 
 def basic_prediciton(df):
-    time_window = pd.Timedelta(minutes=30)
+    """
+    it takes the last X minutes and average the utilization
+    :param df:
+    :return:
+    """
+    time_window = pd.Timedelta(minutes=2)
     latest_time = df["timestamp"].max()
     window_df = df[df["timestamp"] >= (latest_time - time_window)]
+    print(window_df["value"])
 
     return window_df["value"].mean()
