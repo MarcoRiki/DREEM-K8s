@@ -1,0 +1,1 @@
+kind create cluster --config kind-cluster-with-extramounts.yaml

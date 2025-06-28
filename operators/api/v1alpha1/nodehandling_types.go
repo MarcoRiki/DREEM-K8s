@@ -28,22 +28,33 @@ const (
 	NH_PhaseFailed    NodeHandlingPhase = "Failed"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // NodeHandlingSpec defines the desired state of NodeHandling.
 type NodeHandlingSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+
+	// Name of the associated ClusterConfiguration Resource
 	ClusterConfigurationName string `json:"clusterConfigurationName"`
-	NodeSelectingName        string `json:"nodeSelectingName"`
-	SelectedNode             string `json:"selectedNode"`
-	ScalingLabel             int32  `json:"scalingLabel"`
+
+	// Name of the associated NodeSelecting Resource
+	NodeSelectingName string `json:"nodeSelectingName"`
+
+	// Worker selected for the scaling process
+	SelectedNode string `json:"selectedNode"`
+
+	// MachineDeployment selected for the scaling process
+	SelectedMachineDeployment string `json:"selectedMachineDeployment"`
+
+	// Number of node to add to the cluster (it can be positive, scale up, or negative, scale down)
+	ScalingLabel int32 `json:"scalingLabel"`
 }
 
 // NodeHandlingStatus defines the observed state of NodeHandling.
 type NodeHandlingStatus struct {
+
+	// Execution phase of the resource
 	Phase NodeHandlingPhase `json:"phase"`
+
+	// Information message for Failed phase
+	Message string `json:"message"`
 }
 
 // +kubebuilder:object:root=true

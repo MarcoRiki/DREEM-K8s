@@ -40,8 +40,11 @@ spec:
             description: NodeSelectingSpec defines the desired state of NodeSelecting.
             properties:
               clusterConfigurationName:
+                description: Name of the associated ClusterConfiguration Resource
                 type: string
               scalingLabel:
+                description: Number of node to add to the cluster (it can be positive,
+                  scale up, or negative, scale down)
                 format: int32
                 type: integer
             required:
@@ -51,12 +54,22 @@ spec:
           status:
             description: NodeSelectingStatus defines the observed state of NodeSelecting.
             properties:
+              message:
+                description: Information message for Failed phase
+                type: string
               phase:
+                description: Execution phase of the resource
+                type: string
+              selectedMachineDeployment:
+                description: MachineDeployment selected for the scaling process
                 type: string
               selectedNode:
+                description: Worker selected for the scaling process
                 type: string
             required:
+            - message
             - phase
+            - selectedMachineDeployment
             - selectedNode
             type: object
         type: object

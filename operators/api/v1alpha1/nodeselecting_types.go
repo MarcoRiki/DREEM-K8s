@@ -23,30 +23,35 @@ import (
 type NodeSelectingPhase string
 
 const (
-	NS_PhaseRunning  NodeSelectingPhase = "Running"
-	NS_PhaseComplete NodeSelectingPhase = "Completed"
-	NS_PhaseFailed   NodeSelectingPhase = "Failed"
+	NS_PhaseRunning   NodeSelectingPhase = "Running"
+	NS_PhaseCompleted NodeSelectingPhase = "Completed"
+	NS_PhaseFailed    NodeSelectingPhase = "Failed"
 )
-
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // NodeSelectingSpec defines the desired state of NodeSelecting.
 type NodeSelectingSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 
+	// Name of the associated ClusterConfiguration Resource
 	ClusterConfigurationName string `json:"clusterConfigurationName"`
-	ScalingLabel             int32  `json:"scalingLabel"`
+
+	// Number of node to add to the cluster (it can be positive, scale up, or negative, scale down)
+	ScalingLabel int32 `json:"scalingLabel"`
 }
 
 // NodeSelectingStatus defines the observed state of NodeSelecting.
 type NodeSelectingStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 
-	SelectedNode string             `json:"selectedNode"`
-	Phase        NodeSelectingPhase `json:"phase"`
+	// MachineDeployment selected for the scaling process
+	SelectedMachineDeployment string `json:"selectedMachineDeployment"`
+
+	// Worker selected for the scaling process
+	SelectedNode string `json:"selectedNode"`
+
+	// Execution phase of the resource
+	Phase NodeSelectingPhase `json:"phase"`
+
+	// Information message for Failed phase
+	Message string `json:"message"`
 }
 
 // +kubebuilder:object:root=true

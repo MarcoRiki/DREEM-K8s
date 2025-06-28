@@ -4,10 +4,9 @@ metadata:
   name: forecast-parameters
   namespace: dreem
 data:
-  Prometheus_rate_interval: "10m"
-  Prometheus_time_window_prediction_in_minutes: "60"
-  Prometheus_time_window_forecast_in_minutes: "60"
-  Prometheus_query_step: "30s"
+  Past_time_window: "60"
+  Future_time_window: "60"
   Thresholds_min: "50"
   Thresholds_max: "75"
-  Forecast_period_in_minutes: "5"
+  Forecast_period: "5"
+  Prediction_model : "naive" 

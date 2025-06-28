@@ -25,11 +25,15 @@ import (
 
 // ClusterConfigurationSpec defines the desired state of ClusterConfiguration.
 type ClusterConfigurationSpec struct {
-	// Important: Run "make" to regenerate code after modifying this file
 
+	// Number of Requested node at the end of the scaling process
 	RequiredNodes int32 `json:"requiredNodes"`
-	MaxNodes      int32 `json:"maxNodes"`
-	MinNodes      int32 `json:"minNodes,omitempty"`
+
+	// Number of maximum node supported by your infrastructure
+	MaxNodes int32 `json:"maxNodes"`
+
+	// Number of maximum node that has to stay always active in the infrastructure
+	MinNodes int32 `json:"minNodes,omitempty"`
 }
 
 type ClusterConfigurationPhase string
@@ -40,16 +44,20 @@ const (
 	CC_PhaseSwitching ClusterConfigurationPhase = "Switching"
 	CC_PhaseCompleted ClusterConfigurationPhase = "Completed"
 	CC_PhaseFailed    ClusterConfigurationPhase = "Failed"
-	CC_PhaseAborted   ClusterConfigurationPhase = "Aborted"
+	CC_PhaseFinished  ClusterConfigurationPhase = "Finished"
 )
 
 // ClusterConfigurationStatus defines the observed state of ClusterConfiguration.
 type ClusterConfigurationStatus struct {
 
-	// Important: Run "make" to regenerate code after modifying this file
+	// Numeber of active worker at the moment of the resource creation
+	ActiveNodes int32 `json:"activeNodes"`
 
-	ActiveNodes int32                     `json:"activeNodes"`
-	Phase       ClusterConfigurationPhase `json:"phase"`
+	// Execution phase of the resource
+	Phase ClusterConfigurationPhase `json:"phase"`
+
+	// Information message for Failed phase
+	Message string `json:"message"`
 }
 
 // +kubebuilder:object:root=true

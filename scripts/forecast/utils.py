@@ -1,10 +1,13 @@
-from kubernetes import client, config
+from kubernetes import config
 import logging
 import os
+
+logger = logging.getLogger(__name__)
 def load_configuration():
     """
     The function loads the Kubernetes configuration
     """
+    logger.info("K8s configuration loaded")
     local = False
     try:
         # Controlla se siamo in un cluster Kubernetes

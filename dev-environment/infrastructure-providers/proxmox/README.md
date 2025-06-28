@@ -31,9 +31,8 @@ PROXMOX_TOKEN: 'username@pve!realmexample'
 PROXMOX_SECRET: "secret-xxxx-xxxx-...."
 ```
 
-Genetate a template on Proxmox for the VM. // TO WRITE
 
-the `cluster.yaml` file contains a basic manifest to deploy a CAPI cluster on your Proxmox server. You must edit the following fields:
+the `cluster.yaml` file contains a basic manifest to deploy a CAPI cluster on your Proxmox server. It can be generate through the command `clusterctl generate cluster` You must edit the following fields:
 * ProxmoxCluster
     * `spec.allowedNodes`: the nodes on your proxmox server that can be used to instanciate new VM
     * `spec.controlPlaneEndpoint`: the VirtualIP associated to the control plane of the managed cluster

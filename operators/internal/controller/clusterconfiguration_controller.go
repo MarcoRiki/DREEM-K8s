@@ -24,11 +24,14 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -43,7 +46,6 @@ var max_retries = 5
 var retryInterval = 10 * time.Second // seconds
 var timeout = 10 * time.Second
 var pollingInterval = 5 * time.Second // seconds
-var failedAnnotation = "cluster.dreemk8s.io/failed"
 
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=clusterconfigurations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=clusterconfigurations/status,verbs=get;update;patch
@@ -59,17 +61,17 @@ var failedAnnotation = "cluster.dreemk8s.io/failed"
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments/status,verbs=get;update
 
 // Handle the initial phase
-func (r *ClusterConfigurationReconciler) handleInitialPhase(ctx context.Context, clusterConfig clusterv1alpha1.ClusterConfiguration) error {
+func (r *ClusterConfigurationReconciler) handleInitialPhase(ctx context.Context, clusterConfig *clusterv1alpha1.ClusterConfiguration) error {
 	log := log.FromContext(ctx).WithName("handle-intial-phase")
 
 	clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseStable
-	activeNodes, err := getNumberOfMachineDeployments(ctx, r.Client)
+	activeNodes, err := getNumberOfWorkerNodes(ctx, r.Client)
 	if err != nil {
 		log.Error(err, "Failed to get the number of MachineDeployments")
 		return err
 	}
 	clusterConfig.Status.ActiveNodes = activeNodes
-	if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+	if err := r.Status().Update(ctx, clusterConfig); err != nil {
 		log.Error(err, "Failed to update ClusterConfiguration status to Stable phase")
 		return err
 	}
@@ -78,16 +80,18 @@ func (r *ClusterConfigurationReconciler) handleInitialPhase(ctx context.Context,
 }
 
 // Handle the stable phase
-func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, clusterConfig clusterv1alpha1.ClusterConfiguration) error {
+func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) error {
+	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
+	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
 	log := log.FromContext(ctx).WithName("handle-stable-phase")
 
 	// check  if the number of active nodes is different from the expected number
-	updatedDeployments, err := getNumberOfMachineDeployments(ctx, r.Client)
+	updatedNumberOfWorker, err := getNumberOfWorkerNodes(ctx, r.Client)
 	if err != nil {
 		return err
 	}
-	if updatedDeployments != clusterConfig.Status.ActiveNodes {
-		clusterConfig.Status.ActiveNodes = updatedDeployments
+	if updatedNumberOfWorker != clusterConfig.Status.ActiveNodes {
+		clusterConfig.Status.ActiveNodes = updatedNumberOfWorker
 	}
 	var numberOfWorkerToAdd = int32(0)
 	// Check if the number of active nodes is diffent from the required number
@@ -105,12 +109,17 @@ func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, 
 					"name", clusterConfig.Name, "activeNodes", clusterConfig.Status.ActiveNodes,
 					"requiredNodes", clusterConfig.Spec.RequiredNodes, "numberOfWorkerToAdd", numberOfWorkerToAdd)
 				// create a NodeSelecting resource to handle the scaling up
+
+				if err := r.CreateNodeSelecting(ctx, r.Client, numberOfWorkerToAdd, *clusterConfig); err != nil {
+					log.Error(err, "Failed to create NodeHandling resource for scaling down")
+					return err
+				}
 			} else {
 				log.Info("scaling up not needed, maximum number of workers reached",
 					"name", clusterConfig.Name, "activeNodes", clusterConfig.Status.ActiveNodes,
 					"requiredNodes", clusterConfig.Spec.RequiredNodes, "numberOfWorkerToAdd", numberOfWorkerToAdd)
 				clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
-				if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+				if err := r.Status().Update(ctx, clusterConfig); err != nil {
 					log.Error(err, "Failed to update ClusterConfiguration status to Completed phase")
 					return err
 				}
@@ -127,7 +136,7 @@ func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, 
 					"requiredNodes", clusterConfig.Spec.RequiredNodes, "numberOfWorkerToAdd", numberOfWorkerToAdd)
 
 				// Create a NodeHandling resource to handle the scaling down
-				if err := r.CreateNodeSelecting(ctx, r.Client, numberOfWorkerToAdd, clusterConfig.Name); err != nil {
+				if err := r.CreateNodeSelecting(ctx, r.Client, numberOfWorkerToAdd, *clusterConfig); err != nil {
 					log.Error(err, "Failed to create NodeHandling resource for scaling down")
 					return err
 				}
@@ -136,74 +145,89 @@ func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, 
 					"name", clusterConfig.Name, "activeNodes", clusterConfig.Status.ActiveNodes,
 					"requiredNodes", clusterConfig.Spec.RequiredNodes, "numberOfWorkerToAdd", numberOfWorkerToAdd)
 				clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
-				if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+				if err := r.Status().Update(ctx, clusterConfig); err != nil {
 					log.Error(err, "Failed to update ClusterConfiguration status to Completed phase")
 					return err
 				}
 			}
 		}
 		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseSelecting
+		if err := r.Status().Update(ctx, clusterConfig); err != nil {
+			log.Error(err, "Failed to update ClusterConfiguration status to Selecting phase")
+			return err
+		}
 
 	} else {
 		log.Info("Numer of active nodes is equal to the required number, no action needed for ClusterConfiguration",
 			"name", clusterConfig.Name, "activeNodes", clusterConfig.Status.ActiveNodes, "requiredNodes", clusterConfig.Spec.RequiredNodes)
 		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+		if err := r.Status().Update(ctx, clusterConfig); err != nil {
 			log.Error(err, "Failed to update ClusterConfiguration status to Completed phase")
 			return err
 		}
-	}
-	if err := r.Status().Update(ctx, &clusterConfig); err != nil {
-		log.Error(err, "Failed to update ClusterConfiguration status to Selecting phase")
-		return err
 	}
 
 	return nil
 }
 
 // Handle the selecting phase
-func (r *ClusterConfigurationReconciler) handleSelectingPhase(ctx context.Context, clusterConfig clusterv1alpha1.ClusterConfiguration) (bool, error) {
+func (r *ClusterConfigurationReconciler) handleSelectingPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) (bool, error) {
+	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
+	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
 	log := log.FromContext(ctx).WithName("handle-selecting-phase")
 	// Implement the logic for handling the selecting phase
 
 	// Check every pollingInterval if there is a NodeSelecting resource associated with the ClusterConfiguration
 	nodeSelectingList := &clusterv1alpha1.NodeSelectingList{}
 
-	if err := r.List(ctx, nodeSelectingList, client.InNamespace(clusterConfig.Namespace), client.MatchingFields{"spec.clusterConfigurationName": clusterConfig.Name}); err != nil {
-		log.Error(err, "Failed to list NodeSelecting resources for ClusterConfiguration", "name", clusterConfig.Name)
+	if err := r.List(ctx, nodeSelectingList, client.InNamespace(clusterConfig.Namespace)); err != nil {
+		log.Error(err, "Failed to list NodeSelecting resources", "namespace", clusterConfig.Namespace)
 		return false, err
 	}
-	if len(nodeSelectingList.Items) == 1 {
-		log.Info("NodeSelecting resource found for ClusterConfiguration, proceeding with selection",
-			"name", clusterConfig.Name, "nodeSelectingName", nodeSelectingList.Items[0].Name)
 
-		if nodeSelectingList.Items[0].Status.Phase == clusterv1alpha1.NS_PhaseComplete {
-			log.Info("NodeSelecting resource completed successfully, proceeding to Switching phtase",
-				"name", clusterConfig.Name, "nodeSelectingName", nodeSelectingList.Items[0].Name)
+	filteredList := &v1alpha1.NodeSelectingList{}
+	for _, item := range nodeSelectingList.Items {
+		if item.Spec.ClusterConfigurationName == clusterConfig.Name {
+			filteredList.Items = append(filteredList.Items, item)
+		}
+	}
+
+	if len(filteredList.Items) == 1 {
+		log.Info("NodeSelecting resource found for ClusterConfiguration, proceeding with selection",
+			"name", clusterConfig.Name, "nodeSelectingName", filteredList.Items[0].Name)
+
+		if filteredList.Items[0].Status.Phase == clusterv1alpha1.NS_PhaseCompleted {
+			log.Info("NodeSelecting resource completed successfully, proceeding to Switching phase",
+				"name", clusterConfig.Name, "nodeSelectingName", filteredList.Items[0].Name)
 
 			// Update the ClusterConfiguration status to Switching phase
 			clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseSwitching
-			if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+			if err := r.Status().Update(ctx, clusterConfig); err != nil {
 				log.Error(err, "Failed to update ClusterConfiguration status to Switching phase")
 				return false, err
 			}
 		} else {
-			if nodeSelectingList.Items[0].Status.Phase == clusterv1alpha1.NS_PhaseFailed {
+			if filteredList.Items[0].Status.Phase == clusterv1alpha1.NS_PhaseFailed {
 				clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseFailed
-				if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+				clusterConfig.Status.Message = "Failed because of failed NodeSelecting found"
+				if err := r.Status().Update(ctx, clusterConfig); err != nil {
 					log.Error(err, "Failed to update ClusterConfiguration status to Failed phase")
 					return false, err
 				}
 			}
+			log.Info("NodeSelecting resource is still in progress, waiting for completion",
+				"name", clusterConfig.Name, "nodeSelectingName", filteredList.Items[0].Name,
+				"phase", filteredList.Items[0].Status.Phase)
 			return false, nil // Wait for the next polling interval
 		}
 
 		return true, nil
-	} else if len(nodeSelectingList.Items) > 1 {
+	} else if len(filteredList.Items) > 1 {
 		log.Error(nil, "Multiple NodeSelecting resources found for ClusterConfiguration, this should not happen",
-			"name", clusterConfig.Name, "nodeSelectingCount", len(nodeSelectingList.Items))
+			"name", clusterConfig.Name, "nodeSelectingCount", len(filteredList.Items))
 		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseFailed
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+		clusterConfig.Status.Message = "Failed, multiple NodeSelecting found"
+		if err := r.Status().Update(ctx, clusterConfig); err != nil {
 			log.Error(err, "Failed to update ClusterConfiguration status to Failed phase")
 			return false, err
 		}
@@ -214,32 +238,43 @@ func (r *ClusterConfigurationReconciler) handleSelectingPhase(ctx context.Contex
 }
 
 // Handle the switching phase
-func (r *ClusterConfigurationReconciler) handleSwitchingPhase(ctx context.Context, clusterConfig clusterv1alpha1.ClusterConfiguration) (bool, error) {
+func (r *ClusterConfigurationReconciler) handleSwitchingPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) (bool, error) {
+	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
+	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
+
 	log := log.FromContext(ctx).WithName("handle-switching-phase")
 	// Implement the logic for handling the switching phase
 
 	// check if there is a NodeHandling resource associated with the ClusterConfiguration
 	nodeHandlingList := &clusterv1alpha1.NodeHandlingList{}
-	if err := r.List(ctx, nodeHandlingList, client.InNamespace(clusterConfig.Namespace), client.MatchingFields{"spec.clusterConfigurationName": clusterConfig.Name}); err != nil {
-		log.Error(err, "Failed to list NodeHandling resources for ClusterConfiguration", "name", clusterConfig.Name)
+	if err := r.List(ctx, nodeHandlingList, client.InNamespace(clusterConfig.Namespace)); err != nil {
+		log.Error(err, "Failed to list NodeSelecting resources", "namespace", clusterConfig.Namespace)
 		return false, err
 	}
-	if len(nodeHandlingList.Items) == 1 {
+
+	filteredList := &v1alpha1.NodeHandlingList{}
+	for _, item := range nodeHandlingList.Items {
+		if item.Spec.ClusterConfigurationName == clusterConfig.Name {
+			filteredList.Items = append(filteredList.Items, item)
+		}
+	}
+	if len(filteredList.Items) == 1 {
 		log.Info("NodeHandling resource found for ClusterConfiguration, proceeding with handling",
-			"name", clusterConfig.Name, "nodeHandlingName", nodeHandlingList.Items[0].Name)
-		if nodeHandlingList.Items[0].Status.Phase == clusterv1alpha1.NH_PhaseCompleted {
+			"name", clusterConfig.Name, "nodeHandlingName", filteredList.Items[0].Name)
+		if filteredList.Items[0].Status.Phase == clusterv1alpha1.NH_PhaseCompleted {
 			log.Info("NodeHandling resource completed successfully, proceeding to Completed phase",
-				"name", clusterConfig.Name, "nodeHandlingName", nodeHandlingList.Items[0].Name)
+				"name", clusterConfig.Name, "nodeHandlingName", filteredList.Items[0].Name)
 			// Update the ClusterConfiguration status to Completed phase
 			clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseCompleted
-			if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+			if err := r.Status().Update(ctx, clusterConfig); err != nil {
 				log.Error(err, "Failed to update ClusterConfiguration status to Completed phase")
 				return false, err
 			}
 		} else {
-			if nodeHandlingList.Items[0].Status.Phase == clusterv1alpha1.NH_PhaseFailed {
+			if filteredList.Items[0].Status.Phase == clusterv1alpha1.NH_PhaseFailed {
 				clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseFailed
-				if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+				clusterConfig.Status.Message = "Failed because of failed NodeHandling found"
+				if err := r.Status().Update(ctx, clusterConfig); err != nil {
 					log.Error(err, "Failed to update ClusterConfiguration status to Failed phase")
 					return false, err
 				}
@@ -251,7 +286,8 @@ func (r *ClusterConfigurationReconciler) handleSwitchingPhase(ctx context.Contex
 		log.Error(nil, "Multiple NodeHandling resources found for ClusterConfiguration, this should not happen",
 			"name", clusterConfig.Name, "nodeHandlingCount", len(nodeHandlingList.Items))
 		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseFailed
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
+		clusterConfig.Status.Message = "Failed, multiple NodeHandling found"
+		if err := r.Status().Update(ctx, clusterConfig); err != nil {
 			log.Error(err, "Failed to update ClusterConfiguration status to Failed phase")
 			return false, err
 		}
@@ -262,64 +298,53 @@ func (r *ClusterConfigurationReconciler) handleSwitchingPhase(ctx context.Contex
 }
 
 // Handle the failed phase
-func (r *ClusterConfigurationReconciler) handleFailedPhase(ctx context.Context, clusterConfig clusterv1alpha1.ClusterConfiguration) error {
+func (r *ClusterConfigurationReconciler) handleFailedPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) error {
+	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
+	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
 	log := log.FromContext(ctx).WithName("handle-failed-phase")
 	// Implement the logic for handling the failed phase
+	log.Info("Failed phase for ClusterConfiguration",
+		"name", clusterConfig.Name, "phase", clusterConfig.Status.Phase)
 
-	isAdded, err := r.addAnnotationBoolean(ctx, r.Client, clusterConfig, failedAnnotation, true)
-	if err != nil {
-		log.Error(err, "Failed to add 'failed' annotation to ClusterConfiguration", "name", clusterConfig.Name)
-	}
-	if isAdded {
-		log.Info("ClusterConfiguration has already failed once, updating to Aborted phase",
-			"name", clusterConfig.Name)
-		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseAborted
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
-			log.Error(err, "Failed to update ClusterConfiguration status to Aborted phase")
-			return err
-		}
-	} else {
-		log.Info("ClusterConfiguration failed, but it has not failed before, updating to Failed phase",
-			"name", clusterConfig.Name)
-		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseStable
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
-			log.Error(err, "Failed to update ClusterConfiguration status to Stable phase")
-			return err
-		}
-		// delete the NodeHandling and NodeSelecting resources associated with the ClusterConfiguration
-	}
 	return nil
 }
 
 // Handle the completed phase
-func (r *ClusterConfigurationReconciler) handleCompletedPhase(ctx context.Context, clusterConfig clusterv1alpha1.ClusterConfiguration) error {
+func (r *ClusterConfigurationReconciler) handleCompletedPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) error {
+	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
+	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
 	log := log.FromContext(ctx).WithName("handle-completed-phase")
 	// Implement the logic for handling the completed phase
 
-	updatedNumberOfWorker, err := getNumberOfMachineDeployments(ctx, r.Client)
+	updatedNumberOfWorker, err := getNumberOfWorkerNodes(ctx, r.Client)
 	if err != nil {
 		log.Error(err, "Failed to get the number of MachineDeployments")
 		return err
 	}
-	if updatedNumberOfWorker != clusterConfig.Spec.RequiredNodes {
-		log.Info("Something went wrong, the number of active nodes is different from the required number",
-			"name", clusterConfig.Name, "activeNodes", updatedNumberOfWorker, "requiredNodes", clusterConfig.Spec.RequiredNodes)
-		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseFailed
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
-			log.Error(err, "Failed to update ClusterConfiguration status to Failed phase")
-			return err
-		}
-	} else {
-		log.Info("ClusterConfiguration completed successfully",
-			"name", clusterConfig.Name, "activeNodes", updatedNumberOfWorker, "requiredNodes", clusterConfig.Spec.RequiredNodes)
-		clusterConfig.Status.ActiveNodes = updatedNumberOfWorker
-		if err := r.Status().Update(ctx, &clusterConfig); err != nil {
-			log.Error(err, "Failed to update ClusterConfiguration in Completed phase")
-			return err
-		}
-	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 
-	return nil
+		fresh := &clusterv1alpha1.ClusterConfiguration{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(clusterConfig), fresh); err != nil {
+			log.Error(err, "Failed to get fresh ClusterConfiguration")
+			return err
+		}
+
+		if updatedNumberOfWorker != fresh.Spec.RequiredNodes {
+			log.Info("Active nodes differ from required nodes",
+				"name", fresh.Name, "activeNodes", updatedNumberOfWorker, "requiredNodes", fresh.Spec.RequiredNodes)
+			fresh.Status.Phase = clusterv1alpha1.CC_PhaseFailed
+			fresh.Status.Message = "Failed, something wrong happened during the scaling: active nodes differ from required nodes"
+		} else {
+			log.Info("ClusterConfiguration completed successfully",
+				"name", fresh.Name, "activeNodes", updatedNumberOfWorker, "requiredNodes", fresh.Spec.RequiredNodes)
+			fresh.Status.ActiveNodes = updatedNumberOfWorker
+			fresh.Status.Phase = clusterv1alpha1.CC_PhaseFinished
+
+		}
+
+		// Aggiorno lo status con la versione fresca
+		return r.Status().Update(ctx, fresh)
+	})
 }
 
 // For more details, check Reconcile and its Result here:
@@ -340,59 +365,61 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 	// Reconcile from the previous phase
 	switch clusterConfig.Status.Phase {
 	case "":
-		err := r.handleInitialPhase(ctx, *clusterConfig)
+		err := r.handleInitialPhase(ctx, clusterConfig)
 		if err != nil {
 			log.Error(err, "Failed to handle initial phase for ClusterConfiguration", "name", clusterConfig.Name)
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		}
 		break
 	case clusterv1alpha1.CC_PhaseStable:
-		err := r.handleStablePhase(ctx, *clusterConfig)
+		err := r.handleStablePhase(ctx, clusterConfig)
 		if err != nil {
 			log.Error(err, "Failed to handle stable phase for ClusterConfiguration", "name", clusterConfig.Name)
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		}
 		break
 	case clusterv1alpha1.CC_PhaseSelecting:
-		found, err := r.handleSelectingPhase(ctx, *clusterConfig)
+		found, err := r.handleSelectingPhase(ctx, clusterConfig)
 		if err != nil {
 			log.Error(err, "Failed to handle selecting phase for ClusterConfiguration", "name", clusterConfig.Name)
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		}
 		if !found {
 			return ctrl.Result{RequeueAfter: pollingInterval}, nil // Wait for the next polling interval
 		}
 		break
 	case clusterv1alpha1.CC_PhaseSwitching:
-		found, err := r.handleSwitchingPhase(ctx, *clusterConfig)
+		found, err := r.handleSwitchingPhase(ctx, clusterConfig)
 		if err != nil {
 			log.Error(err, "Failed to handle switching phase for ClusterConfiguration", "name", clusterConfig.Name)
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		}
 		if !found {
 			return ctrl.Result{RequeueAfter: pollingInterval}, nil // Wait for the next polling interval
 		}
 		break
 	case clusterv1alpha1.CC_PhaseFailed:
-		err := r.handleFailedPhase(ctx, *clusterConfig)
+		err := r.handleFailedPhase(ctx, clusterConfig)
 		if err != nil {
 			log.Error(err, "Failed to handle failed phase for ClusterConfiguration", "name", clusterConfig.Name)
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		}
 		break
 	case clusterv1alpha1.CC_PhaseCompleted:
-		err := r.handleCompletedPhase(ctx, *clusterConfig)
+		err := r.handleCompletedPhase(ctx, clusterConfig)
 		if err != nil {
 			log.Error(err, "Failed to handle completed phase for ClusterConfiguration", "name", clusterConfig.Name)
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		}
 		break
-	case clusterv1alpha1.CC_PhaseAborted:
-		log.Info("ClusterConfiguration is in Aborted phase, no further action needed", "name", clusterConfig.Name)
-		// No further action needed, just return
-		return ctrl.Result{}, nil
+	case clusterv1alpha1.CC_PhaseFinished:
+		log.Info("ClusterConfiguration is in Finished phase, no further action needed", "name", clusterConfig.Name)
+		break
 	default:
 		log.Info("Unknown phase for ClusterConfiguration, handling as Failed", "name", clusterConfig.Name, "phase", clusterConfig.Status.Phase)
+		clusterConfig.Status.Phase = clusterv1alpha1.CC_PhaseFailed
+		clusterConfig.Status.Message = "Unknown phase, handle as Failed"
+		r.Status().Update(ctx, clusterConfig)
 		break
 	}
 
@@ -413,7 +440,7 @@ func (r *ClusterConfigurationReconciler) SetupWithManager(mgr ctrl.Manager) erro
 }
 
 // CreateNodeSelecting creates a NodeSelecting resource to handle the scaling up/down of the cluster
-func (r *ClusterConfigurationReconciler) CreateNodeSelecting(ctx context.Context, k8sClient client.Client, numberOfWorkerToAdd int32, clusterConfigName string) error {
+func (r *ClusterConfigurationReconciler) CreateNodeSelecting(ctx context.Context, k8sClient client.Client, numberOfWorkerToAdd int32, clusterConfig clusterv1alpha1.ClusterConfiguration) error {
 	log := log.FromContext(ctx).WithName("create-node-selecting")
 
 	crdNameBytes := make([]byte, 8)
@@ -422,14 +449,23 @@ func (r *ClusterConfigurationReconciler) CreateNodeSelecting(ctx context.Context
 		return err
 	}
 	crdName := "node-selecting-" + fmt.Sprintf("%x", crdNameBytes)
+	ownerRef := metav1.OwnerReference{
+		APIVersion:         clusterConfig.APIVersion,
+		Kind:               clusterConfig.Kind,
+		Name:               clusterConfig.Name,
+		UID:                clusterConfig.UID,
+		Controller:         pointer.BoolPtr(true), // segnala che è il controller
+		BlockOwnerDeletion: pointer.BoolPtr(true),
+	}
 
 	var nodeSelecting = &clusterv1alpha1.NodeSelecting{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      crdName,
-			Namespace: "dreem",
+			Name:            crdName,
+			Namespace:       "dreem",
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Spec: clusterv1alpha1.NodeSelectingSpec{
-			ClusterConfigurationName: clusterConfigName,
+			ClusterConfigurationName: clusterConfig.Name,
 			ScalingLabel:             numberOfWorkerToAdd,
 		},
 	}
@@ -440,21 +476,4 @@ func (r *ClusterConfigurationReconciler) CreateNodeSelecting(ctx context.Context
 	}
 	log.Info("NodeSelecting CRD created", "name", nodeSelecting.Name)
 	return nil
-}
-
-func (r *ClusterConfigurationReconciler) addAnnotationBoolean(ctx context.Context, k8sClient client.Client, clusterConfig clusterv1alpha1.ClusterConfiguration, annotation string, value bool) (bool, error) {
-	log := log.FromContext(ctx).WithName("add-annotation-boolean")
-	// Check if the annotation already exists
-	if _, exists := clusterConfig.Annotations[annotation]; exists {
-		// If the annotation already exists, return false
-		return true, nil
-	}
-
-	// Add the annotation to the ClusterConfiguration
-	if clusterConfig.Annotations == nil {
-		clusterConfig.Annotations = make(map[string]string)
-	}
-	clusterConfig.Annotations[annotation] = fmt.Sprintf("%t", value)
-	log.Info("Adding annotation to ClusterConfiguration", "name", clusterConfig.Name, "annotation", annotation, "value", "true")
-	return false, nil
 }

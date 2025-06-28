@@ -40,29 +40,40 @@ spec:
             description: NodeHandlingSpec defines the desired state of NodeHandling.
             properties:
               clusterConfigurationName:
-                description: |-
-                  INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-                  Important: Run "make" to regenerate code after modifying this file
+                description: Name of the associated ClusterConfiguration Resource
                 type: string
               nodeSelectingName:
+                description: Name of the associated NodeSelecting Resource
                 type: string
               scalingLabel:
+                description: Number of node to add to the cluster (it can be positive,
+                  scale up, or negative, scale down)
                 format: int32
                 type: integer
+              selectedMachineDeployment:
+                description: MachineDeployment selected for the scaling process
+                type: string
               selectedNode:
+                description: Worker selected for the scaling process
                 type: string
             required:
             - clusterConfigurationName
             - nodeSelectingName
             - scalingLabel
+            - selectedMachineDeployment
             - selectedNode
             type: object
           status:
             description: NodeHandlingStatus defines the observed state of NodeHandling.
             properties:
+              message:
+                description: Information message for Failed phase
+                type: string
               phase:
+                description: Execution phase of the resource
                 type: string
             required:
+            - message
             - phase
             type: object
         type: object

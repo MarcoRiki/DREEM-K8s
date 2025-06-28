@@ -41,12 +41,16 @@ spec:
             description: ClusterConfigurationSpec defines the desired state of ClusterConfiguration.
             properties:
               maxNodes:
+                description: Number of maximum node supported by your infrastructure
                 format: int32
                 type: integer
               minNodes:
+                description: Number of maximum node that has to stay always active
+                  in the infrastructure
                 format: int32
                 type: integer
               requiredNodes:
+                description: Number of Requested node at the end of the scaling process
                 format: int32
                 type: integer
             required:
@@ -58,12 +62,19 @@ spec:
               ClusterConfiguration.
             properties:
               activeNodes:
+                description: Numeber of active worker at the moment of the resource
+                  creation
                 format: int32
                 type: integer
+              message:
+                description: Information message for Failed phase
+                type: string
               phase:
+                description: Execution phase of the resource
                 type: string
             required:
             - activeNodes
+            - message
             - phase
             type: object
         type: object

@@ -1,6 +1,7 @@
 # TESTS
 here you can find all the scripts used to test DREEM and see its behavior
 
+# PRELIMINARY TEST
 ### Configuration
 Talos Machines:
 * Control Plane: 4GB RAM + 4 CPU + 15GB storage
