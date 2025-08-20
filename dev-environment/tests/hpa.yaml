@@ -15,13 +15,13 @@ spec:
       policies:
       - type: Pods
         value: 1
-        periodSeconds: 300
+        periodSeconds: 240
       stabilizationWindowSeconds: 60
     scaleDown:
       policies:
       - type: Pods
         value: 1
-        periodSeconds: 300
+        periodSeconds: 240
       stabilizationWindowSeconds: 60
   metrics:
   - type: Resource
@@ -29,5 +29,5 @@ spec:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 60
+        averageUtilization: 55
   

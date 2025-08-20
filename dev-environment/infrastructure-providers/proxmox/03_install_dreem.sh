@@ -13,7 +13,7 @@ helm install kind-prometheus prometheus-community/kube-prometheus-stack \
   --set prometheus-node-exporter.service.type=NodePort
 
 
-kubectl apply -f ../../configmaps -n dreem
+kubectl apply -f ../../../configmaps -n dreem
 
 
 helm install kind-prometheus prometheus-community/kube-prometheus-stack \
@@ -35,4 +35,4 @@ kubectl label namespace monitoring pod-security.kubernetes.io/warn=privileged --
   helm upgrade kind-prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --reuse-values \
-  --set-file prometheus.prometheusSpec.additionalScrapeConfigs=../docker/scrapefederate.yaml 
+  --set-file prometheus.prometheusSpec.additionalScrapeConfigs=../scrapefederate.yaml 

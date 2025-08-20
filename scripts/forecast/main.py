@@ -3,16 +3,17 @@ import random
 import string
 import time
 from kubernetes.client.rest import ApiException
-from forecast import load_data_instance_cpu, basic_prediction, evaluate_predicted_cpu
+from forecast import load_data_instance_cpu, basic_prediction, evaluate_predicted_cpu, LSTM_univariate_CPU
 import logging
 import utils
 from kubernetes import client
 from kubernetes.dynamic import DynamicClient
+from tensorflow.keras.models import load_model
 
 
 logger = logging.getLogger(__name__)
 
-def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model):
+def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot):
     """
     The function returns the number of nodes that must be turned on (positive number) or off (negative number)
     """
@@ -20,6 +21,7 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
 
     result = 0
     if model == "naive":
+
         logger.info("naive CPU prediction is started")
         df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window)
         if err:
@@ -34,6 +36,28 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
         #print(predicted_cpu_per_instance)
         result = evaluate_predicted_cpu(predicted_cpu_per_instance, min_threshold, max_threshold)
         logger.info(f"Scaling result:{result}")
+
+    elif model == "LSTM":
+
+        logger.info("LSTM CPU prediction is started")
+        df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window)
+        if err:
+            logger.error("error in loading data for forecast")
+            return 0
+        predicted_cpu_per_instance = []
+        grouped = df_cpu.groupby('instance')
+        model = load_model("model_12.keras")
+        for instance, group_df in grouped:
+            print(instance)
+            pred_cpu = LSTM_univariate_CPU(group_df, model, mean_time_to_boot )
+            pred_cpu = pred_cpu if pred_cpu > 0 else 0
+            predicted_cpu_per_instance.append(float(pred_cpu))
+            logger.info(f"CPU predicted mean load: {pred_cpu}%  for node {instance}")
+        #print(predicted_cpu_per_instance)
+        result = evaluate_predicted_cpu(predicted_cpu_per_instance, min_threshold, max_threshold)
+        logger.info(f"Scaling result:{result}")
+
+
     else:
         logger.error(f"model {model} not implemented. Scaling not performed")
     return result
@@ -58,7 +82,7 @@ def create_cluster_configuration(requiredNodes, min_nodes, max_nodes):
         status = cr.get("status", {})
         phase = status.get("phase", "")
         #print(phase)
-        if phase not in ["Completed", "Aborted"]:
+        if phase not in ["Finished", "Failed"]:
             logging.info(f"Existing ClusterConfiguration '{cr['metadata']['name']}' is not completed. Skipping creation.")
             return
 
@@ -106,6 +130,7 @@ def read_forecast_cm():
     max_threshold= 80
     forecast_period_in_minutes= 30
     model = "naive"
+    mean_time_to_boot = 2
 
     # update the CM if values are present
     v1 = client.CoreV1Api()
@@ -120,13 +145,13 @@ def read_forecast_cm():
         max_threshold = int(cm.get("Thresholds_max", max_threshold))
         forecast_period_in_minutes = int(cm.get("Forecast_period_in_minutes", forecast_period_in_minutes))
         model = cm.get("Prediction_model", model)
+        mean_time_to_boot = cm.get("Mean_time_to_boot", mean_time_to_boot)
 
     except client.exceptions.ApiException as e:
         logging.error(f"Error during the reading of the ConfigMap: {e}")
         return None
 
-
-    return  past_time_window,future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model
+    return  past_time_window,future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot
 
 def read_cluster_configuration_cm():
     """
@@ -187,7 +212,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     utils.load_configuration()
 
-    past_time_window, future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model = read_forecast_cm()
+    past_time_window, future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot= read_forecast_cm()
     prometheus_url = get_prometheus_url()
     #print(prometheus_url)
     min_nodes, max_nodes = read_cluster_configuration_cm()
@@ -196,7 +221,7 @@ def main():
     while True:
         active_worker = get_active_worker()
         #print("min, max, active " + min_nodes, max_nodes, active_nodes)
-        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model)
+        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot)
        # print("scaling:", scaling_label)
 
         # create the CRD only if the cluster configuration (aka number of nodes) has to be updated
@@ -204,8 +229,8 @@ def main():
             required_worker= active_worker + scaling_label
             #print("required:" ,required_nodes)
             create_cluster_configuration(required_worker, min_nodes, max_nodes)
-        logger.info(f"forecast finished, next forecast in {forecast_period_in_minutes} minutes")
-        time.sleep(forecast_period_in_minutes * 60)
+        logger.info(f"forecast finished, next forecast in 3 minutes")
+        time.sleep(3 * 60)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ helm install kind-prometheus prometheus-community/kube-prometheus-stack \
 
 
 
-kubectl apply -f ../../configmaps -n dreem
+kubectl apply -f ../../../configmaps -n dreem
 
 #kubectl create ns monitoring --kubeconfig ~/.kube/capi 
 
@@ -41,4 +41,4 @@ helm install kind-prometheus prometheus-community/kube-prometheus-stack \
   helm upgrade kind-prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --reuse-values \
-  --set-file prometheus.prometheusSpec.additionalScrapeConfigs=scrapefederate.yaml 
+  --set-file prometheus.prometheusSpec.additionalScrapeConfigs=../scrapefederate.yaml 

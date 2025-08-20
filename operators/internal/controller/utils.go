@@ -18,7 +18,8 @@ func getNumberOfWorkerNodes(ctx context.Context, k8sClient client.Client) (int32
 	var numberOfWorkerNodes int32
 	for _, md := range machineDeploymentList.Items {
 
-		numberOfWorkerNodes += md.Status.ReadyReplicas
+		//numberOfWorkerNodes += md.Status.ReadyReplicas
+		numberOfWorkerNodes += md.Status.Replicas
 	}
 	return numberOfWorkerNodes, nil
 }

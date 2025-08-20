@@ -4,9 +4,10 @@ metadata:
   name: forecast-parameters
   namespace: dreem
 data:
-  Past_time_window: "60"
+  Past_time_window: "5"
   Future_time_window: "60"
-  Thresholds_min: "50"
-  Thresholds_max: "75"
+  Thresholds_min: "45"
+  Thresholds_max: "70"
   Forecast_period: "5"
-  Prediction_model : "naive" 
+  Prediction_model : "LSTM"
+  Mean_time_to_boot: "1"

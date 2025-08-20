@@ -83,11 +83,11 @@ class SinusoidalExpShape(LoadTestShape):
     """
     Sinusoide con ampiezza crescente esponenzialmente.
     """
-    base_users = 80
-    amplitude = 70           # ampiezza massima
-    period = 25*60              # durata ciclo sinusoide (secondi)
+    base_users = 85
+    amplitude = 75           # ampiezza massima
+    period = 60*60              # durata ciclo sinusoide (secondi)
     spawn_rate = 2           # utenti al secondo
-    growth_factor = 20*60      # in secondi, tempo per "stabilizzarsi"
+    growth_factor = 25*60      # in secondi, tempo per "stabilizzarsi"
 
     def tick(self):
         run_time = self.get_run_time()
