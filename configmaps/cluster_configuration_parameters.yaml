@@ -5,5 +5,5 @@ metadata:
   namespace: dreem
 data:
   minNodes: "1"
-  maxNodes: "5"
+  maxNodes: "5" #worker + cp
 

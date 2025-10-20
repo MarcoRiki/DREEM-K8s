@@ -94,26 +94,28 @@ func (r *NodeSelectingReconciler) handleInitialPhase(ctx context.Context, nodeSe
 
 }
 
-func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) error {
+func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, retrievedNode []string, addUnique func(string)) (error, []string, bool) {
 	log := log.FromContext(ctx).WithName("handle-running-phase")
 	nodeSelectServer := getNodeSelectionURL()
+
 	response, err := getSelectedNode(ctx, nodeSelectServer, nodeSelecting.Spec.ScalingLabel)
 	if err != nil {
 		log.Error(err, "Failed to get response from Node Selection Service", "nodeSelectServer", nodeSelectServer)
-		return err
+		return err, retrievedNode, false
 	}
 	selectedNode := response.SelectedNode
 	selectedMD := response.MachineDeployment
 	fullName, err := r.resolveFullNodeName(ctx, selectedNode)
-	fmt.Print("AAAAA, fullName: ", fullName, "\n")
+	addUnique(fullName)
+
 	if selectedNode == "" {
 		nodeSelecting.Status.Phase = v1alpha1.NS_PhaseFailed
 		nodeSelecting.Status.Message = "Server failed getting a valid node for the scaling"
 		if err := r.Status().Update(ctx, nodeSelecting); err != nil {
 			log.Error(err, "Failed to update NodeSelecting resource status to Failed", "name", nodeSelecting.Name)
-			return err
+			return err, retrievedNode, false
 		}
-		return fmt.Errorf("no node selected, null result on NodeSelecting %s", nodeSelecting.Name)
+		return fmt.Errorf("no node selected, null result on NodeSelecting %s", nodeSelecting.Name), retrievedNode, false
 	}
 
 	if nodeSelecting.Spec.ScalingLabel < 0 {
@@ -125,9 +127,9 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 			nodeSelecting.Status.Message = "Failed to check if the node can be drained: " + err.Error()
 			if updateErr := r.Status().Update(ctx, nodeSelecting); updateErr != nil {
 				log.Error(updateErr, "Failed to update NodeSelecting resource status to Failed", "name", nodeSelecting.Name)
-				return updateErr
+				return updateErr, retrievedNode, false
 			}
-			return err
+			return err, retrievedNode, false
 		}
 
 		if isDrainable {
@@ -139,25 +141,20 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 				nodeSelecting.Status.Message = "Failed to drain node: " + err.Error()
 				if updateErr := r.Status().Update(ctx, nodeSelecting); updateErr != nil {
 					log.Error(updateErr, "Failed to update NodeSelecting resource status to Failed", "name", nodeSelecting.Name)
-					return updateErr
+					return updateErr, retrievedNode, false
 				}
-				return err
+				return err, retrievedNode, false
 			}
 		} else {
-			nodeSelecting.Status.Phase = v1alpha1.NS_PhaseFailed
-			nodeSelecting.Status.Message = "Draining simulation failed: no other node available for the drain operation"
-			if err := r.Status().Update(ctx, nodeSelecting); err != nil {
-				log.Error(err, "Failed to update NodeSelecting resource status to Failed", "name", nodeSelecting.Name)
-				return err
-			}
-			return fmt.Errorf("no other node available for the drain operation on NodeSelecting %s", nodeSelecting.Name)
+			// select another node for draining, if there are no nodes available, fail the operation
+			return fmt.Errorf("node %s cannot be drained, no available nodes to migrate pods", fullName), retrievedNode, false
 		}
 	}
 	// if the simulation is successful, create the NodeHandling resource
 	errNH := r.CreateNodeHandling(ctx, nodeSelecting, selectedNode, selectedMD)
 	if errNH != nil {
 		log.Error(err, "Failed to create NodeHandling resource in NodeSelecting", "name", nodeSelecting.Name)
-		return err
+		return err, retrievedNode, false
 	}
 
 	nodeSelecting.Status.SelectedNode = selectedNode
@@ -165,10 +162,10 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 	nodeSelecting.Status.Phase = v1alpha1.NS_PhaseCompleted
 	if err := r.Status().Update(ctx, nodeSelecting); err != nil {
 		log.Error(err, "Failed to update NodeSelecting resource status to Completed", "name", nodeSelecting.Name)
-		return err
+		return err, retrievedNode, false
 	}
 
-	return nil
+	return nil, retrievedNode, true
 }
 
 // For more details, check Reconcile and its Result here:
@@ -192,10 +189,42 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		break
 	case v1alpha1.NS_PhaseRunning:
-		if err := r.handleRunningPhase(ctx, nodeSelecting); err != nil {
-			log.Error(err, "Failed to handle Running phase for NodeSelecting resource", "name", nodeSelecting.Name)
-			return ctrl.Result{}, err
+
+		retrievedNode := []string{}
+		nodeSet := make(map[string]struct{}) // set per nodi già provati
+
+		addUnique := func(value string) {
+			if _, exists := nodeSet[value]; !exists {
+				retrievedNode = append(retrievedNode, value)
+				nodeSet[value] = struct{}{}
+			}
+
 		}
+
+		isDrainable := false
+		numWorkerNodes, _ := getNumberOfWorkerNodes(ctx, r.Client)
+
+		// continua finché non trovi un nodo drainable o hai provato tutti i nodi
+		for !isDrainable && len(retrievedNode) < int(numWorkerNodes) {
+			err, nodes, isDrain := r.handleRunningPhase(ctx, nodeSelecting, retrievedNode, addUnique)
+			if err != nil {
+				log.Error(err, "Failed to handle Running phase for NodeSelecting resource", "name", nodeSelecting.Name)
+				return ctrl.Result{}, err
+			}
+			retrievedNode = nodes
+			isDrainable = isDrain
+		}
+
+		if !isDrainable {
+			log.Info("No drainable node found, all nodes tried", "name", nodeSelecting.Name)
+			nodeSelecting.Status.Phase = v1alpha1.NS_PhaseFailed
+			nodeSelecting.Status.Message = "No drainable node found, all nodes tried, aborting the operation"
+			if err := r.Status().Update(ctx, nodeSelecting); err != nil {
+				log.Error(err, "Failed to update NodeSelecting resource status to Failed", "name", nodeSelecting.Name)
+				return ctrl.Result{}, err
+			}
+		}
+
 		break
 	case v1alpha1.NS_PhaseFailed:
 		log.Info("NodeSelecting resource is in Failed phase, no further action needed", "name", nodeSelecting.Name)

@@ -86,19 +86,35 @@ def basic_prediction(df, prediction_window):
     return window_df["value"].mean()
 
 def evaluate_predicted_cpu(values, min_threshold, max_threshold):
-    if all(v > max_threshold for v in values):
+    if any(v > max_threshold for v in values): # if only one is above the threshold, it scales up
         return 1
-    elif all(v < min_threshold for v in values):
+    elif all(v < min_threshold for v in values): # all the node must be below the threshold to scale-down
         return -1
     else:
         return 0
 
 def LSTM_univariate_CPU(df, model, mean_time_to_boot):
+    #best_model-3.keras
     #X_max = 93.0
     #X_min = 3
-    X_max = 91
-    X_min = 18
-    window_size= 20
+    #window_size= 20
+    
+    #model_12.keras
+    # X_max = 91
+    # X_min = 18
+    #window_size= 20
+    
+     #model_0.keras - version 89
+    # X_max = 96
+    # X_min = 0
+    # window_size= 25
+    
+     #model_0-2.keras - models63
+    X_max = 95
+    X_min = 0
+    window_size= 15
+    
+    
     # set column CPU total usage in the dataset
     # | timestamp | value | instance
 
@@ -118,9 +134,10 @@ def LSTM_univariate_CPU(df, model, mean_time_to_boot):
     y_pred_denorm = y_pred_flatten * (X_max - X_min) + X_min
 
     # exclude the first minutes which are needed to boot up a new server
-    points_to_not_consider = int(mean_time_to_boot) * 4 # query step is 15s, hence 4 points per minute
+    points_to_not_consider = int(mean_time_to_boot) * 4 # query step is 30s, hence 2 points per minute
     y_pred_valid = y_pred_denorm[points_to_not_consider:]
-
+    #print("input values:", df['cpu_smooth'])
+   # print("new values:", y_pred_valid)
     return y_pred_valid.mean()
 
 

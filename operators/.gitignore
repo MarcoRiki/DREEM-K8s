@@ -25,3 +25,10 @@ go.work
 *.swp
 *.swo
 *~
+
+# Logs
+*.csv
+
+# Temporary files
+*.tmp
+*.temp

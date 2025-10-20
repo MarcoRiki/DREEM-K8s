@@ -20,7 +20,6 @@ import (
 	"context"
 	"time"
 
-	"golang.org/x/exp/rand"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -79,9 +78,11 @@ func (r *NodeHandlingReconciler) handleInitialPhase(ctx context.Context, nodeHan
 func (r *NodeHandlingReconciler) handleRunningPhase(ctx context.Context, nodeHandling *clusterv1alpha1.NodeHandling) error {
 	log := log.FromContext(ctx).WithName("handle-running-phase")
 
+	log.Info("Calling Cluster API", "name", nodeHandling.Name)
+
 	if nodeHandling.Spec.ScalingLabel > 0 {
 		log.Info("NodeHandling has to scale up", "name", nodeHandling.Name)
-		err := r.scaleUp(ctx, nodeHandling.Spec.ScalingLabel)
+		err := r.scaleUp(ctx, nodeHandling.Spec.ScalingLabel, nodeHandling.Spec.SelectedMachineDeployment)
 		if err != nil {
 			nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
 			nodeHandling.Status.Message = "Failed scaling up cluster"
@@ -174,7 +175,7 @@ func (r *NodeHandlingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}).
 		Complete(r)
 }
-func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32) error {
+func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32, selectedMD_string string) error {
 	log := log.FromContext(ctx).WithName("scale-up")
 
 	// get the MachineDeployment and update the replicas
@@ -190,8 +191,18 @@ func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32
 	}
 
 	// Select a random MachineDeployment from the list and scale it up
-	randomIndex := rand.Intn(len(machineDeploymentList.Items))
-	machineDeployment := &machineDeploymentList.Items[randomIndex]
+	//randomIndex := rand.Intn(len(machineDeploymentList.Items))
+	//machineDeployment := &machineDeploymentList.Items[randomIndex]
+	machineDeployment := &clusterv1.MachineDeployment{}
+	if selectedMD_string != "" {
+		// If a specific MachineDeployment is selected, use it
+		for _, md := range machineDeploymentList.Items {
+			if md.Name == selectedMD_string {
+				machineDeployment = &md
+				break
+			}
+		}
+	}
 	clusterNamespace := machineDeployment.Namespace
 	machineDeploymentName := machineDeployment.Name
 
@@ -228,6 +239,7 @@ func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32
 
 		if md.Status.ReadyReplicas == newReplicas {
 			log.Info("MachineDeployment successfully scaled", "replicas", md.Status.ReadyReplicas)
+
 			return true, nil
 		}
 		return false, nil
@@ -278,6 +290,7 @@ func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode str
 			newReplicas = 0
 		}
 		machineDeploymentObj.Spec.Replicas = &newReplicas
+
 		if err := r.Update(ctx, machineDeploymentObj); err != nil {
 			log.Error(err, "Failed to update MachineDeployment replicas")
 			return err

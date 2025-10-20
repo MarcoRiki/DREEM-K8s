@@ -277,11 +277,12 @@ def scale_down():
         )
 
 
-        if len(md_by_consumption["high"]):
+
+        if md_by_consumption["high"][0]['spec']['replicas']:
             return return_machine_by_profile("high", machine_resource, md_by_consumption,prometheus_url)
-        elif len(md_by_consumption["medium"]):
+        elif md_by_consumption["medium"][0]['spec']['replicas']:
             return return_machine_by_profile("medium", machine_resource, md_by_consumption, prometheus_url)
-        elif len(md_by_consumption["low"]):
+        elif md_by_consumption["low"][0]['spec']['replicas']:
             return return_machine_by_profile("low", machine_resource, md_by_consumption, prometheus_url)
 
 

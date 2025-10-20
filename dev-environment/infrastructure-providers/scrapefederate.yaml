@@ -7,4 +7,3 @@
   static_configs:
     - targets:
         -  192.168.11.116:30000 #change with the ip of the control-plane node (managed cluster) with the prometheus service port
-        -  192.168.11.115:30000

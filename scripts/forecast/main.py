@@ -9,9 +9,27 @@ import utils
 from kubernetes import client
 from kubernetes.dynamic import DynamicClient
 from tensorflow.keras.models import load_model
+from tensorflow.keras.layers import Layer, Dense
+import tensorflow as tf
+from keras.saving import register_keras_serializable
+from keras.utils import get_custom_objects
 
 
 logger = logging.getLogger(__name__)
+
+# @register_keras_serializable()
+# class Attention(Layer):
+#     def __init__(self, **kwargs):
+#         super(Attention, self).__init__()
+#         self.W = Dense(1, activation='tanh')  # definito una volta sola
+
+#     def call(self, inputs):
+#         # inputs: (batch_size, timesteps, features)
+#         score = self.W(inputs)                           # (batch, timesteps, 1)
+#         weights = tf.nn.softmaxcreate a new ClusterConfiguration resource(score, axis=1)           # pesi su asse temporale
+#         context = weights * inputs                       # applica i pesi
+#         context = tf.reduce_sum(context, axis=1)         # aggrega
+#         return context
 
 def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot):
     """
@@ -46,7 +64,8 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
             return 0
         predicted_cpu_per_instance = []
         grouped = df_cpu.groupby('instance')
-        model = load_model("model_12.keras")
+        
+        model = load_model("model_0-2.keras")
         for instance, group_df in grouped:
             print(instance)
             pred_cpu = LSTM_univariate_CPU(group_df, model, mean_time_to_boot )
@@ -126,11 +145,11 @@ def read_forecast_cm():
     # set some default values
     past_time_window = 5
     future_time_window = 60
-    min_threshold = 50
-    max_threshold= 80
+    min_threshold = 65
+    max_threshold= 45
     forecast_period_in_minutes= 30
-    model = "naive"
-    mean_time_to_boot = 2
+    model = "LSTM"
+    mean_time_to_boot = 1
 
     # update the CM if values are present
     v1 = client.CoreV1Api()
@@ -159,7 +178,7 @@ def read_cluster_configuration_cm():
        """
     # set some default values
     min_nodes=1
-    max_nodes=10
+    max_nodes=5
 
     # update the CM if values are present
     v1 = client.CoreV1Api()
@@ -228,7 +247,10 @@ def main():
         if scaling_label != 0:
             required_worker= active_worker + scaling_label
             #print("required:" ,required_nodes)
-            create_cluster_configuration(required_worker, min_nodes, max_nodes)
+            if required_worker >= int(min_nodes) and required_worker < int(max_nodes):
+                create_cluster_configuration(required_worker, min_nodes, max_nodes)
+            else:
+                logger.info("reached infrastructure constaints, scaling not possible")
         logger.info(f"forecast finished, next forecast in 3 minutes")
         time.sleep(3 * 60)
 

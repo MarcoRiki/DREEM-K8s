@@ -99,7 +99,7 @@ spec:
           - op: add
             path: /cluster/controllerManager/extraArgs
             value:
-              horizontal-pod-autoscaler-tolerance: "0.25"
+              horizontal-pod-autoscaler-tolerance: "0.20"
 
 
 

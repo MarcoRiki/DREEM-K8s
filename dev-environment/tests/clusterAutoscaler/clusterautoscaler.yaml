@@ -33,7 +33,7 @@ spec:
         - --scale-down-utilization-threshold=0.5
         - --scale-down-unneeded-time=1m
         - --scale-down-delay-after-add=2m
-        - --scale-down-unready-time=5m
+        - --scale-down-unready-time=1m
 
         volumeMounts:
         - name: kubeconfig
