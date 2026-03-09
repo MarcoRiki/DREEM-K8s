@@ -80,8 +80,12 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var externalClusterName string
+	var clusterNamespace string
 	flag.StringVar(&externalClusterName, "external-cluster-name", "external-cluster",
 		"The name of the external cluster to connect to.")
+	flag.StringVar(&clusterNamespace, "cluster-namespace", "default",
+		"The namespace where the external cluster secret is located.")
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -221,7 +225,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	externalClient, externalConfig, err := getExternalClient("dreem-mmiracapillo-cluster", mgr.GetConfig(), context.Background())
+	externalClient, externalConfig, err := getExternalClient(externalClusterName, clusterNamespace, mgr.GetConfig(), context.Background())
 	if err != nil {
 		setupLog.Error(err, "unable to create external client")
 		os.Exit(1)
@@ -284,7 +288,7 @@ func main() {
 	}
 }
 
-func getExternalClient(clustername string, cfg *rest.Config, ctx context.Context) (client.Client, *rest.Config, error) {
+func getExternalClient(clustername string, namespace string, cfg *rest.Config, ctx context.Context) (client.Client, *rest.Config, error) {
 	// Carica la config da file kubeconfig
 	// cfg, err := clientcmd.BuildConfigFromFlags("", "/Users/marco/.kube/capi")
 	// if err != nil {
@@ -304,7 +308,7 @@ func getExternalClient(clustername string, cfg *rest.Config, ctx context.Context
 
 	err = directClient.Get(ctx, types.NamespacedName{
 		Name:      secretName,
-		Namespace: "default",
+		Namespace: namespace,
 	}, secret)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get kubeconfig secret %s: %w", secretName, err)

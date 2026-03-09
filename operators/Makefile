@@ -97,7 +97,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go --external-cluster-name=dreem-mmiracapillo-cluster -v=2
+	go run ./cmd/main.go --external-cluster-name=dreem-mmiracapillo-cluster --cluster-namespace=default -v=2
 	
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.

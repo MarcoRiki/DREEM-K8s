@@ -23,7 +23,7 @@ helm install kind-prometheus prometheus-community/kube-prometheus-stack \
   --kubeconfig $MANAGEMENT_KUBECONFIG
 
 sleep 60
-cd ../../operators/
+cd ../operators/
 
 export KUBECONFIG=$MANAGEMENT_KUBECONFIG
 echo "⚙️ Installing dreem operator on the management cluster..."

@@ -32,3 +32,6 @@ go.work
 # Temporary files
 *.tmp
 *.temp
+
+# Custom files
+scrapefederate.yaml

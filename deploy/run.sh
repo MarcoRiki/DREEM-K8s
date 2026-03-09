@@ -1,6 +1,7 @@
 # bin/sh
 
 echo "🚀 Deploying Dreem on the management cluster and target cluster..."
+echo " "
 
 #checking if the TARGET_KUBECONFIG and MANAGEMENT_KUBECONFIG variables are set, if not exit with an error message
 if [ -z "$TARGET_KUBECONFIG" ] || [ -z "$MANAGEMENT_KUBECONFIG" ]; then
@@ -13,12 +14,14 @@ fi
 # Export PROMETHEUS_PORT before generating federate config
 export PROMETHEUS_PORT=30000
 
-echo "⚙️ Generating federate scrape config for the management cluster... \n"
+echo "⚙️ Generating federate scrape config for the management cluster..."
+echo " "
 ./install_script/generate_federate_job.sh
 echo "⏳ Waiting for federate config generation to complete..."
 sleep 2
 
-echo "⚙️ Deploying Dreem components on the management cluster... \n"
+echo "⚙️ Deploying Dreem components on the management cluster... "
+echo " "
 ./install_script/management_cluster.sh
 echo "⏳ Waiting for management cluster components to be deployed..."
 sleep 10
@@ -27,7 +30,8 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n m
 echo "⏳ Waiting for dreem operator to be ready..."
 kubectl wait --for=condition=ready pod -l control-plane=controller-manager -n dreem-system --timeout=180s --kubeconfig $TARGET_KUBECONFIG || echo "Warning: Dreem operator may still be starting"
 
-echo "⚙️ Deploying required components on the target cluster... \n"
+echo "⚙️ Deploying required components on the target cluster... "
+echo " "
 ./install_script/target_cluster.sh
 echo "⏳ Waiting for target cluster components to be deployed..."
 sleep 10
@@ -38,7 +42,8 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n m
 echo "⏳ Waiting before verification steps..."
 sleep 5
 
-echo "⚙️ Verifying the deployment of DREEM on both clusters... \n"
+echo "⚙️ Verifying the deployment of DREEM on both clusters... "
+echo " "
 echo "⚙️ Checking if the monitoring stack is up and running on the management cluster..."
 kubectl get pods -n monitoring --kubeconfig $TARGET_KUBECONFIG
 if [ $? -ne 0 ]; then

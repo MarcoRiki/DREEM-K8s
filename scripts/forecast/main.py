@@ -218,14 +218,13 @@ def read_cluster_configuration_cm():
 
     return min_nodes, max_nodes
 
-def get_prometheus_url():
-    local_conf= utils.load_configuration()
+# def get_prometheus_url(args=None):
+#     local_conf= utils.load_configuration()
 
-    if local_conf:
-        return "http://localhost:9090/"
-    else:
-        return "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090"
-
+#     if local_conf:
+#         return "http://localhost:9090/"
+#     else:
+#         return args.prometheus_url
 
 
 def get_active_worker():
@@ -254,13 +253,16 @@ def main():
     parser = argparse.ArgumentParser(description='Forecast script for DREEM-K8s')
     parser.add_argument('--start-after', type=int, default=0, 
                         help='Minutes to wait before starting the first forecast (default: 0)')
+    parser.add_argument('--prometheus-url', type=str, default="http://localhost:9090", 
+                        help='URL of the Prometheus service')
     args = parser.parse_args()
+    # add prometheus service url
     
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     utils.load_configuration()
 
     past_time_window, future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot, enabled = read_forecast_cm()
-    prometheus_url = get_prometheus_url()
+    prometheus_url = args.prometheus_url
 
     min_nodes, max_nodes = read_cluster_configuration_cm()
 

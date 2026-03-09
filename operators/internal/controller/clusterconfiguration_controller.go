@@ -55,8 +55,11 @@ var pollingInterval = 5 * time.Second // seconds
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandling,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandling/status,verbs=get;update;patch
 
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments/status,verbs=get;update
+
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines/status,verbs=get;update
 
 // Handle the initial phase
 func (r *ClusterConfigurationReconciler) handleInitialPhase(ctx context.Context, clusterConfig *clusterv1alpha1.ClusterConfiguration) error {
