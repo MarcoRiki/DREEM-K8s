@@ -2,7 +2,8 @@
 import pandas as pd
 import datetime
 from prometheus_api_client import PrometheusConnect
-
+import torch
+import torch.nn as nn
 from utils import *
 import numpy as np
 import urllib3
@@ -12,11 +13,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
 
 
-
 def load_data_instance_cpu(prometheus_url, past_time_window):
     """
     This function perform the query to retrieve the data of the CPU load in order to make prediction.
     Query: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[RATE_INTERVAL])))'
+    Returns resampled data at 5-minute intervals for PyTorch LSTM model.
     """
     logger.info("loading CPU data to make prediction")
 
@@ -31,9 +32,9 @@ def load_data_instance_cpu(prometheus_url, past_time_window):
     # Costruisci la query PromQL
     cpu_query = (
         '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-        f'exported_instance!~"{regex}", exported_job="node-exporter"}}[1m])) by (exported_instance)))'
+        f'exported_instance!~"{regex}", exported_job="node-exporter"}}[2m])) by (exported_instance)))'
     )
-    print(cpu_query)
+    
     prom_client = PrometheusConnect(url=prometheus_url, disable_ssl=True)
     end_time = datetime.datetime.now()
     start_time = end_time - datetime.timedelta(minutes=past_time_window)
@@ -44,33 +45,41 @@ def load_data_instance_cpu(prometheus_url, past_time_window):
         step="15s"
     )
 
-    if results:
-        logger.info("CPU query has data")
+    if not results:
+        logger.info("CPU query has no data, defaulting to empty DataFrame")
+        return pd.DataFrame(), True
 
-        data = []
+    logger.info("CPU query has data")
 
-        for metric in results:
-            instance = metric['metric']['exported_instance']
-            for timestamp, value in metric['values']:
-                data.append({
-                    'timestamp': pd.to_datetime(timestamp, unit='s'),
-                    'value': float(value),
-                    'instance': instance
-                })
+    data = []
 
-        # Crea il DataFrame
-        df = pd.DataFrame(data)
-        #print(df)
+    for metric in results:
+        instance = metric['metric']['exported_instance']
+        for timestamp, value in metric['values']:
+            data.append({
+                'ds': pd.to_datetime(timestamp, unit='s'),
+                'cpu_util_percent': float(value),
+                'instance': instance
+            })
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+    # Crea il DataFrame
+    df = pd.DataFrame(data)
+    df = df.sort_values(['instance', 'ds'])
 
-    else:
-        df = pd.DataFrame([{ "timestamp": pd.Timestamp.now(),"value": 0.0, "instance": ""}])
-        logger.info("CPU query has no data, defaulting to 0")
-        return df, True
+    # Resample a 5 minuti e interpola per ogni istanza
+    dfs_resampled = []
+    for instance, df_instance in df.groupby('instance'):
+        df_instance = df_instance.set_index('ds').sort_index()
+        df_resampled = df_instance[['cpu_util_percent']].resample('5min').mean()
+        df_resampled = df_resampled.interpolate(method='linear', limit_direction='both')
+        df_resampled['instance'] = instance
+        df_resampled = df_resampled.reset_index()
+        dfs_resampled.append(df_resampled)
 
-    #print(df)
-    return df, False
+    df_final = pd.concat(dfs_resampled, ignore_index=True)
+    logger.info(f"Resampled data to 5min intervals: {len(df_final)} rows for {len(dfs_resampled)} instances")
+
+    return df_final, False
 
 
 
@@ -92,6 +101,54 @@ def evaluate_predicted_cpu(values, min_threshold, max_threshold):
         return -1
     else:
         return 0
+
+    
+def LSTM_torch_forecast_CPU(df_instance, model, mean_time_to_boot):
+    """
+    Fa il forecast per una singola istanza usando il modello PyTorch LSTM.
+    
+    Args:
+        df_instance: DataFrame con colonne 'ds' e 'cpu_util_percent' per una singola istanza
+        model: Modello PyTorch già caricato
+        mean_time_to_boot: Tempo medio di boot in minuti
+    
+    Returns:
+        Media del forecast escludendo il tempo di boot
+    """
+    # Valori di normalizzazione dal training (dal notebook)
+    cpu_mean = 37.661774760007766
+    cpu_std = 15.296503574604664
+    
+    # Estrai la serie CPU
+    cpu_series = df_instance['cpu_util_percent'].values
+    
+    # Verifica che ci siano abbastanza dati
+    if len(cpu_series) < INPUT_WINDOW:
+        logger.warning(f"Not enough data for forecast: {len(cpu_series)} < {INPUT_WINDOW}. Returning last value.")
+        return None
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+
+    # Prendi gli ultimi INPUT_WINDOW punti
+    x = torch.tensor(cpu_series[-INPUT_WINDOW:], dtype=torch.float32)
+    # Normalizza
+    x = ((x - cpu_mean) / cpu_std).unsqueeze(0).unsqueeze(-1).to(device)
+
+    # Fai la predizione
+    with torch.no_grad():
+        pred = model(x).cpu().numpy()[0]
+
+    # Denormalizza
+    pred_denorm = pred * cpu_std + cpu_mean
+    
+    # Escludi i primi minuti necessari per il boot
+    points_to_skip = int(mean_time_to_boot / 5)
+    pred_valid = pred_denorm[points_to_skip:] if points_to_skip < len(pred_denorm) else pred_denorm
+    
+    # Ritorna la media del forecast
+    return float(pred_valid.mean())
+    
 
 def LSTM_univariate_CPU(df, model, mean_time_to_boot):
     #best_model-3.keras

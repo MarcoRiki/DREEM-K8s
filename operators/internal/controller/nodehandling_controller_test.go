@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package controller_test
 
 import (
 	"context"
@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
+	"github.com/MarcoRiki/DREEM-K8s/internal/controller"
 )
 
 var _ = Describe("NodeHandling Controller", func() {
@@ -68,7 +69,7 @@ var _ = Describe("NodeHandling Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &NodeHandlingReconciler{
+			controllerReconciler := &controller.NodeHandlingReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

@@ -1,3 +1,65 @@
-*.keras
+
+# OS files
 *.DS_Store
+Thumbs.db
+
+# Python cache and temporary files
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+.venv/
+venv/
+ENV/
+env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Docker
+*.log
+
+# Kubernetes
+*.kubeconfig
+kubeconfig
+.kube/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+tmp/
+temp/
+
+# Configuration files with secrets
+*.env
+.env.local
+secrets.yaml
+*secret*.yaml

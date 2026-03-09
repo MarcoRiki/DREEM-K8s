@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stress-ng-test
+spec:
+  selector:
+    matchLabels:
+      app: stress-ng-test
+  template:
+    metadata:
+      labels:
+        app: stress-ng-test
+    spec:
+      nodeName: mmiracapillodreemmd-3-sjdxx-lnmdk
+      containers:
+      - name: pod-stress-test
+        image: polinux/stress-ng
+        command: [ "/bin/bash", "-c", "--" ]
+        args: [ "stress-ng --cpu 3 --timeout 30s " ]
+        # resources:
+        #   requests:
+        #     memory: 0
+        #     cpu: 0
+        #   limits:
+        #     memory: dynamic
+        #     cpu: dynamic

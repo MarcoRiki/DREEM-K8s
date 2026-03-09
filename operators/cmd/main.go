@@ -17,20 +17,29 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
+	klog "k8s.io/klog/v2"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	v1 "k8s.io/api/core/v1"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -42,6 +51,11 @@ import (
 	capi "sigs.k8s.io/cluster-api/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
+
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="core",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="core",resources=pods,verbs=get;list;watch
 
 var (
 	scheme   = runtime.NewScheme()
@@ -65,6 +79,9 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var externalClusterName string
+	flag.StringVar(&externalClusterName, "external-cluster-name", "external-cluster",
+		"The name of the external cluster to connect to.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -82,12 +99,13 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+
+	klog.InitFlags(nil)
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
-
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
@@ -203,6 +221,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	externalClient, externalConfig, err := getExternalClient("dreem-mmiracapillo-cluster", mgr.GetConfig(), context.Background())
+	if err != nil {
+		setupLog.Error(err, "unable to create external client")
+		os.Exit(1)
+	}
+
 	if err = (&controller.ClusterConfigurationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -211,8 +235,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.NodeSelectingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		ExternalClient: externalClient,
+		ExternalConfig: externalConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeSelecting")
 		os.Exit(1)
@@ -256,4 +282,48 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func getExternalClient(clustername string, cfg *rest.Config, ctx context.Context) (client.Client, *rest.Config, error) {
+	// Carica la config da file kubeconfig
+	// cfg, err := clientcmd.BuildConfigFromFlags("", "/Users/marco/.kube/capi")
+	// if err != nil {
+	// 	return nil, nil, err
+	// }
+
+	// // Crea client controller-runtime con la config esterna
+	// cl, err := client.New(cfg, client.Options{})
+	// if err != nil {
+	// 	return nil, nil, err
+	// }
+	directClient, err := client.New(cfg, client.Options{
+		Scheme: scheme,
+	})
+	secretName := clustername + "-kubeconfig"
+	secret := &v1.Secret{}
+
+	err = directClient.Get(ctx, types.NamespacedName{
+		Name:      secretName,
+		Namespace: "default",
+	}, secret)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get kubeconfig secret %s: %w", secretName, err)
+	}
+
+	kubeconfigData, ok := secret.Data["value"]
+	if !ok {
+		return nil, nil, fmt.Errorf("secret %s does not contain 'value' field", secretName)
+	}
+
+	externalCfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create rest config from kubeconfig data: %w", err)
+	}
+
+	cl, err := client.New(externalCfg, client.Options{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create client from rest config: %w", err)
+	}
+
+	return cl, externalCfg, nil
 }

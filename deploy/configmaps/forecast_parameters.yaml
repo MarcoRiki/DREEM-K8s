@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forecast-parameters
+  namespace: dreem
+data:
+  Past_time_window: "5" # in minutes, only for naive model. The LSTM has a fixed window of 120 min input and 60 min output
+  Future_time_window: "60"
+  Thresholds_min: "45"
+  Thresholds_max: "65"
+  Forecast_period: "5"
+  Prediction_model : "LSTM" # or naive
+  Mean_time_to_boot: "1"
+  Enabled: "false" 

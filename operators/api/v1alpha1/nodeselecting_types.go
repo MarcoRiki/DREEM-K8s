@@ -52,6 +52,9 @@ type NodeSelectingStatus struct {
 
 	// Information message for Failed phase
 	Message string `json:"message"`
+
+	// JSON representation of the nodes ranking
+	NodesRanking string `json:"nodesRanking"`
 }
 
 // +kubebuilder:object:root=true

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: selection-weights-scale-up
+  namespace: dreem
+data:
+  EnergyProfile: "0.5"
+  PowerCycles: "0.5"

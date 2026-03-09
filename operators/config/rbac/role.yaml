@@ -8,6 +8,8 @@ rules:
   - ""
   resources:
   - nodes
+  - pods
+  - secrets
   - services
   verbs:
   - get

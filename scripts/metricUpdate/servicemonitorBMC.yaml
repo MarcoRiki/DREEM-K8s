@@ -1,0 +1,82 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bmc-exporter
+  namespace: monitoring
+  labels:
+    app: bmc-exporter
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - name: metrics
+    port: 30389
+    targetPort: 30389
+    protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: bmc-exporter
+  namespace: monitoring
+subsets:
+  - addresses:
+      - ip: 192.168.67.15
+    ports:
+      - name: metrics
+        port: 30389
+        protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: bmc-exporter
+  namespace: monitoring
+  labels:
+    app: bmc-exporter
+    release: kind-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: bmc-exporter
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+    params:
+      target:
+      - "192.168.24.81"
+    relabelings:
+    - sourceLabels: []
+      targetLabel: bmc_target
+      replacement: "192.168.24.81"
+    - sourceLabels: []
+      targetLabel: node_name
+      replacement: "worker-node-1"
+  - port: metrics
+    interval: 30s
+    path: /metrics
+    params:
+      target:
+      - "192.168.24.82"
+    relabelings:
+    - sourceLabels: []
+      targetLabel: bmc_target
+      replacement: "192.168.24.82"
+    - sourceLabels: []
+      targetLabel: node_name
+      replacement: "worker-node-2"
+  - port: metrics
+    interval: 30s
+    path: /metrics
+    params:
+      target:
+      - "192.168.24.91"
+    relabelings:
+    - sourceLabels: []
+      targetLabel: bmc_target
+      replacement: "192.168.24.91"
+    - sourceLabels: []
+      targetLabel: node_name
+      replacement: "worker-node-3"

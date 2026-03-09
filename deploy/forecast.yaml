@@ -15,6 +15,79 @@ spec:
       labels:
         app: forecast
     spec:
+      serviceAccountName: forecast-sa
       containers:
       - name: forecast
-        image: dreem-forecast:0.0.1
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/forecast:0.0.4
+        args: ["--start-after", "0"]  # Attende 5 minuti prima di iniziare
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: forecast-sa
+  namespace: dreem
+
+---
+# Role per accedere a ConfigMaps e ClusterConfigurations nel namespace dreem
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: forecast-role
+  namespace: dreem
+rules:
+  # Permessi per leggere ConfigMaps
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  
+  # Permessi per ClusterConfiguration CRD
+  - apiGroups: ["cluster.dreemk8s"]
+    resources: ["clusterconfigurations"]
+    verbs: ["get", "list", "watch", "create"]
+  
+  # Permessi per leggere lo status di ClusterConfiguration
+  - apiGroups: ["cluster.dreemk8s"]
+    resources: ["clusterconfigurations/status"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: forecast-rolebinding
+  namespace: dreem
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: forecast-role
+subjects:
+  - kind: ServiceAccount
+    name: forecast-sa
+    namespace: dreem
+
+---
+# ClusterRole per accedere alle Machines di Cluster API
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: forecast-machines-reader
+rules:
+  # Permessi per leggere le Machines (Cluster API)
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machines"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: forecast-machines-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: forecast-machines-reader
+subjects:
+  - kind: ServiceAccount
+    name: forecast-sa
+    namespace: dreem

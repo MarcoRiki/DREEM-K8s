@@ -5,6 +5,13 @@ from kubernetes import client
 from kubernetes.dynamic import DynamicClient
 
 logger = logging.getLogger(__name__)
+
+INPUT_TIME=2*60
+INPUT_WINDOW = int(INPUT_TIME/5)
+HORIZON_TIME=1*60
+HORIZON = int(HORIZON_TIME/5)
+BATCH_SIZE = 512
+
 def load_configuration():
     """
     The function loads the Kubernetes configuration
