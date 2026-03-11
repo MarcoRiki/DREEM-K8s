@@ -89,6 +89,7 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 	if nodeSelecting.Spec.ScalingLabel < 0 {
 		klog.V(2).Info("Trying to scale down infrastructure")
 		err, MD, dNode := r.selectNodeScaleDown(ctx, nodeSelecting)
+		klog.V(2).Info("selectNodeScaleDown returned", "error", err, "selectedMD", MD, "selectedNode", dNode)
 		if err != nil {
 			return err
 		}
@@ -112,6 +113,7 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 		nodeSelecting.Status.Message = "No node can be shutdown at the moment"
 
 	} else if selectedMD != "" && selectedNode != "" {
+		klog.V(2).Info("Node and MD selected, creating NodeHandling", "selectedNode", selectedNode, "selectedMD", selectedMD)
 		// if the simulation is successful, create the NodeHandling resource
 		errNH := r.CreateNodeHandling(ctx, nodeSelecting, selectedNode, selectedMD)
 		if errNH != nil {
@@ -125,10 +127,12 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 
 		nodeSelecting.Status.Phase = v1alpha1.NS_PhaseCompleted
 	}
+	klog.V(2).Info("Updating NodeSelecting status", "phase", nodeSelecting.Status.Phase)
 	if err := r.Status().Update(ctx, nodeSelecting); err != nil {
 		klog.V(2).ErrorS(err, "Failed to update NodeSelecting resource status to Completed", "name", nodeSelecting.Name)
 		return err
 	}
+	klog.V(2).Info("handleRunningPhase completed successfully")
 	return nil
 
 }
@@ -163,6 +167,11 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection in scale up")
 		return err, ""
+	}
+
+	if len(rankedNodes) == 0 {
+		klog.V(2).Info("No machine deployments available after applying soft constraints")
+		return nil, ""
 	}
 
 	selectedMD = rankedNodes[0].Name
@@ -257,23 +266,45 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 		klog.V(3).Info("No node can be shutdown after checking hard constraints")
 		return nil, selectedMD, selectedNode
 	}
+
+	// Check if there's at least one non-empty combination
+	hasNonEmptyCombination := false
+	for _, comb := range total_valid {
+		if len(comb) > 0 {
+			hasNonEmptyCombination = true
+			break
+		}
+	}
+	if !hasNonEmptyCombination {
+		klog.V(3).Info("All combinations are empty, no valid scheduling configuration found")
+		return nil, selectedMD, selectedNode
+	}
+
 	// select randomly one of the valid nodes to shutdown
 	index, _ := rand.Int(rand.Reader, big.NewInt(int64(len(total_valid))))
 
-	// check whether it is an emplty combination. if so, choose another one
+	// check whether it is an empty combination. if so, choose another one
 	for len(total_valid[index.Int64()]) == 0 {
 		index, _ = rand.Int(rand.Reader, big.NewInt(int64(len(total_valid))))
 	}
 
+	klog.V(2).Info("Calling ApplySoftConstraints", "numAssignments", len(total_valid[index.Int64()]), "numNodes", len(validNodeToShutdown))
 	rankedNodes, err := ApplySoftConstraints(total_valid[index.Int64()], validNodeToShutdown, ctx, r.ExternalClient, r.Client, *nodeSelecting)
+	klog.V(2).Info("ApplySoftConstraints returned", "hasError", err != nil, "numRankedNodes", len(rankedNodes))
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection")
 		return err, "", ""
 	}
 
+	if len(rankedNodes) == 0 {
+		klog.V(2).Info("No nodes available after applying soft constraints")
+		return nil, selectedMD, selectedNode
+	}
+
 	selectedNode = rankedNodes[0].Name
 	selectedMD = getMDfromNode(selectedNode, r.Client, ctx)
 
+	klog.V(2).Info("Scale down selection completed", "selectedNode", selectedNode, "selectedMD", selectedMD)
 	return nil, selectedMD, selectedNode
 }
 

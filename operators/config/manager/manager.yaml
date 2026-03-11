@@ -65,7 +65,7 @@ spec:
           - --health-probe-bind-address=:8081
           - --external-cluster-name=dreem-mmiracapillo-cluster
           - --cluster-namespace=default
-        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.3
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.5
         imagePullPolicy: IfNotPresent
         
         name: manager

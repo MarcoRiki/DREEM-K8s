@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -275,9 +276,25 @@ func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode str
 		klog.V(2).Info("No selected node provided for scaling down, cannot proceed")
 		return nil
 	}
-	selectedNodeObj := &clusterv1.Machine{}
-	if err := r.Get(ctx, client.ObjectKey{Name: selectedNode, Namespace: "default"}, selectedNodeObj); err != nil {
-		klog.V(2).ErrorS(err, "Failed to get Machine", "name", selectedNode)
+
+	// Find the Machine by listing all machines and matching by name
+	machineList := &clusterv1.MachineList{}
+	if err := r.List(ctx, machineList); err != nil {
+		klog.V(2).ErrorS(err, "Failed to list Machines")
+		return err
+	}
+
+	var selectedNodeObj *clusterv1.Machine
+	for i, machine := range machineList.Items {
+		if machine.Name == selectedNode {
+			selectedNodeObj = &machineList.Items[i]
+			break
+		}
+	}
+
+	if selectedNodeObj == nil {
+		err := fmt.Errorf("Machine %s not found", selectedNode)
+		klog.V(2).ErrorS(err, "Failed to find Machine", "name", selectedNode)
 		return err
 	}
 
@@ -292,9 +309,24 @@ func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode str
 		return err
 	}
 
-	machineDeploymentObj := &clusterv1.MachineDeployment{}
-	if err := r.Get(ctx, client.ObjectKey{Name: selectedMD, Namespace: "default"}, machineDeploymentObj); err != nil {
-		klog.V(2).ErrorS(err, "Failed to get MachineDeployment", "name", selectedMD)
+	// Find the MachineDeployment by listing all machinedeployments and matching by name
+	machineDeploymentList := &clusterv1.MachineDeploymentList{}
+	if err := r.List(ctx, machineDeploymentList); err != nil {
+		klog.V(2).ErrorS(err, "Failed to list MachineDeployments")
+		return err
+	}
+
+	var machineDeploymentObj *clusterv1.MachineDeployment
+	for i, md := range machineDeploymentList.Items {
+		if md.Name == selectedMD {
+			machineDeploymentObj = &machineDeploymentList.Items[i]
+			break
+		}
+	}
+
+	if machineDeploymentObj == nil {
+		err := fmt.Errorf("MachineDeployment %s not found", selectedMD)
+		klog.V(2).ErrorS(err, "Failed to find MachineDeployment", "name", selectedMD)
 		return err
 	}
 

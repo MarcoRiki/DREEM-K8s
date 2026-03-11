@@ -6,7 +6,7 @@ if [ -z "$TARGET_KUBECONFIG" ] || [ -z "$MANAGEMENT_KUBECONFIG" ]; then
 fi
 
 # use the kubeconfig in TARGET_KUBECONFIG of the management cluster to install the monitoring stack and configmaps for the forecast parameters 
-kubectl create ns dreem --kubeconfig $MANAGEMENT_KUBECONFIG
+kubectl create ns dreem --kubeconfig $MANAGEMENT_KUBECONFIG --dry-run=client -o yaml | kubectl apply -f - --kubeconfig $MANAGEMENT_KUBECONFIG
 
 echo "⚙️ Installing monitoring stack on the management cluster..."
 helm install kind-prometheus prometheus-community/kube-prometheus-stack \
@@ -23,11 +23,12 @@ helm install kind-prometheus prometheus-community/kube-prometheus-stack \
   --kubeconfig $MANAGEMENT_KUBECONFIG
 
 sleep 60
+
+kubectl apply -f configmaps -n dreem --kubeconfig $MANAGEMENT_KUBECONFIG
 cd ../operators/
 
 export KUBECONFIG=$MANAGEMENT_KUBECONFIG
 echo "⚙️ Installing dreem operator on the management cluster..."
-# apply configmaps for the forecast parameters
-kubectl apply -f configmaps -n dreem --kubeconfig $MANAGEMENT_KUBECONFIG
+
 make install
 make deploy 

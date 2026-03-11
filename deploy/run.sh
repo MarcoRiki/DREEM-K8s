@@ -3,6 +3,7 @@
 echo "🚀 Deploying Dreem on the management cluster and target cluster..."
 echo " "
 
+helm repo update
 #checking if the TARGET_KUBECONFIG and MANAGEMENT_KUBECONFIG variables are set, if not exit with an error message
 if [ -z "$TARGET_KUBECONFIG" ] || [ -z "$MANAGEMENT_KUBECONFIG" ]; then
   echo "Error: TARGET_KUBECONFIG and MANAGEMENT_KUBECONFIG variables are not set"

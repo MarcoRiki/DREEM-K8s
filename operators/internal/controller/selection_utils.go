@@ -6,7 +6,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	"gopkg.in/yaml.v3"
@@ -534,6 +533,12 @@ func ApplySoftConstraintsScaleUp(ctx context.Context, md []clusterapi.MachineDep
 		}
 	}
 
+	// Check if we have any valid criteria
+	if len(criteriaList) == 0 {
+		klog.V(2).Info("No valid criteria collected for TOPSIS scale-up evaluation, all MachineDeployments had errors or are already running")
+		return []clusterapi.MachineDeployment{}, nil
+	}
+
 	// load weights
 	weights, err := LoadAHPweightsScaleUp(ctx, k8sClient)
 	if err != nil {
@@ -609,6 +614,12 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 		criteriaList = append(criteriaList, criteria)
 	}
 
+	// Check if we have any valid criteria
+	if len(criteriaList) == 0 {
+		klog.V(2).Info("No valid criteria collected for TOPSIS evaluation, all nodes had errors during data collection")
+		return []corev1.Node{}, nil
+	}
+
 	// load weights
 	weights, err := LoadAHPweights(managementClusterClient, ctx)
 	if err != nil {
@@ -668,7 +679,7 @@ func GetPowerCycle(nodeManagedCluster corev1.Node, ctx context.Context, manageme
 	}
 
 	machineDeployment := &clusterapi.MachineDeployment{}
-	err = managementClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: "default"}, machineDeployment)
+	err = managementClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: machineClusterAPI.Namespace}, machineDeployment)
 	if err != nil {
 		return 0, err
 	}
@@ -732,7 +743,7 @@ func GetEnergyProfile(nodeManagedCluster corev1.Node, ctx context.Context, manag
 		return 0, nil
 	}
 	machineDeployment := &clusterapi.MachineDeployment{}
-	err = managementClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: "default"}, machineDeployment)
+	err = managementClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: machineClusterAPI.Namespace}, machineDeployment)
 	if err != nil {
 		return 0, err
 	}
@@ -1016,6 +1027,12 @@ func LoadAHPweightsScaleUp(ctx context.Context, managementClient client.Client) 
 // 7. Rank the alternatives
 func ApplyTOPSIS(criteriaList []TOPSISCriteria, weights AHPweights, nodeSelecting clusterv1alpha1.NodeSelecting, managementClusterClient client.Client, ctx context.Context) ([]RankedNode, error) {
 
+	// Check if criteriaList is empty
+	if len(criteriaList) == 0 {
+		klog.V(2).Info("No nodes available for TOPSIS evaluation")
+		return []RankedNode{}, nil
+	}
+
 	// 1. Create the evaluation matrix consisting of criteriaList alternatives and their criteria values.
 	evalMatrix := MakeEvaluationMatrix(criteriaList)
 
@@ -1045,12 +1062,12 @@ func ApplyTOPSIS(criteriaList []TOPSISCriteria, weights AHPweights, nodeSelectin
 
 	// 7. Rank the alternatives based on their relative closeness: the higher, the better
 	sortedRankedNodes := SortNodesByCloseness(rankedNodes)
-	nodes := []string{}
-	name := "scaleDown_" + time.Now().Format("20060102_150405")
-	for _, crit := range criteriaList {
-		nodes = append(nodes, crit.Node.Name)
-	}
-	saveMatrixToJSON(name+".json", weightedMatrix, nodes, nodeSelecting, managementClusterClient, ctx)
+	// nodes := []string{}
+	// name := "scaleDown_" + time.Now().Format("20060102_150405")
+	// for _, crit := range criteriaList {
+	// 	nodes = append(nodes, crit.Node.Name)
+	// }
+	// saveMatrixToJSON(name+".json", weightedMatrix, nodes, nodeSelecting, managementClusterClient, ctx)
 
 	return sortedRankedNodes, nil
 }
@@ -1058,6 +1075,12 @@ func ApplyTOPSIS(criteriaList []TOPSISCriteria, weights AHPweights, nodeSelectin
 // APPLY TOPSIS METHOD FOR SCALE UP (simplified model)
 func ApplyTOPSISScaleUp(criteriaList []TOPSISCriteriaScaleUp, weights AHPweightsScaleUp, nodeSelecting clusterv1alpha1.NodeSelecting, managementClusterClient client.Client, ctx context.Context) ([]clusterapi.MachineDeployment, error) {
 	// Implementation for scale up TOPSIS application
+
+	// Check if criteriaList is empty
+	if len(criteriaList) == 0 {
+		klog.V(2).Info("No machine deployments available for TOPSIS evaluation")
+		return []clusterapi.MachineDeployment{}, nil
+	}
 
 	evalMatrix := MakeEvaluationMatrixScaleUp(criteriaList)
 	normalizedMatrix := NormalizeMatrix(evalMatrix)
@@ -1067,12 +1090,12 @@ func ApplyTOPSISScaleUp(criteriaList []TOPSISCriteriaScaleUp, weights AHPweights
 	relativeCloseness := CalculateRelativeCloseness(separationFromIdeal, separationFromNegativeIdeal)
 
 	// name with timestamp
-	name := "scaleUp_" + time.Now().Format("20060102_150405")
-	nodes := []string{}
-	for _, crit := range criteriaList {
-		nodes = append(nodes, crit.MachineDeployment.Name)
-	}
-	saveMatrixToJSON(name+".json", weightedMatrix, nodes, nodeSelecting, managementClusterClient, ctx)
+	// name := "scaleUp_" + time.Now().Format("20060102_150405")
+	// nodes := []string{}
+	// for _, crit := range criteriaList {
+	// 	nodes = append(nodes, crit.MachineDeployment.Name)
+	// }
+	// saveMatrixToJSON(name+".json", weightedMatrix, nodes, nodeSelecting, managementClusterClient, ctx)
 
 	// Associate relative closeness to MachineDeployment
 	rankedMDs := make([]RankedMachineDeployment, len(criteriaList))
@@ -1124,6 +1147,11 @@ func MakeEvaluationMatrix(criteriaList []TOPSISCriteria) []map[string]float64 {
 
 func NormalizeMatrix(matrix []map[string]float64) []map[string]float64 {
 	numAlternatives := len(matrix)
+	// Check if matrix is empty
+	if numAlternatives == 0 {
+		klog.V(2).Info("Empty matrix provided to NormalizeMatrix")
+		return []map[string]float64{}
+	}
 	// get keys from first row
 	keys := make([]string, 0, len(matrix[0]))
 	for k := range matrix[0] {
