@@ -32,7 +32,7 @@ class LSTMForecast(nn.Module):
 
 logger = logging.getLogger(__name__)
 
-def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot):
+def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, cluster_namespace, external_cluster_name):
     """
     The function returns the number of nodes that must be turned on (positive number) or off (negative number)
     """
@@ -42,7 +42,7 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
     if model == "naive":
 
         logger.info("naive CPU prediction is started")
-        df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window)
+        df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, external_cluster_name)
         if err:
             logger.error("error in loading data for forecast")
             return 0
@@ -59,7 +59,7 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
     elif model == "LSTM":
 
         logger.info("LSTM CPU prediction is started")
-        df_cpu, err = load_data_instance_cpu(prometheus_url, INPUT_TIME)
+        df_cpu, err = load_data_instance_cpu(prometheus_url, INPUT_TIME, cluster_namespace, external_cluster_name)
         if err:
             logger.error("error in loading data for forecast")
             return 0
@@ -76,6 +76,8 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
         predicted_cpu_per_instance = []
         grouped = df_cpu.groupby('instance')
         
+        # non considerare il control-plane
+        
         # Itera su ogni istanza e fa il forecast
         for instance, group_df in grouped:
             logger.info(f"Processing forecast for instance: {instance}")
@@ -83,7 +85,8 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
             try:
                 pred_cpu = LSTM_torch_forecast_CPU(group_df, lstm_model, mean_time_to_boot)
                 if pred_cpu is None:
-                    return None
+                    logger.warning(f"Insufficient data for instance {instance}, skipping")
+                    continue  # Skip this instance
                 pred_cpu = max(pred_cpu, 0)  # Assicura che sia non negativo
                 predicted_cpu_per_instance.append(float(pred_cpu))
                 logger.info(f"CPU predicted mean load: {pred_cpu:.2f}% for node {instance}")
@@ -94,6 +97,11 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
                     last_value = group_df['cpu_util_percent'].iloc[-1]
                     predicted_cpu_per_instance.append(float(last_value))
                     logger.warning(f"Using last known value {last_value:.2f}% for node {instance}")
+        
+        # Check if we have any predictions
+        if len(predicted_cpu_per_instance) == 0:
+            logger.warning("No instances with sufficient data for prediction")
+            return 0
         
         result = evaluate_predicted_cpu(predicted_cpu_per_instance, min_threshold, max_threshold)
         logger.info(f"Scaling result:{result}")
@@ -209,7 +217,7 @@ def read_cluster_configuration_cm():
         config_map = v1.read_namespaced_config_map(name="cluster-configuration-parameters", namespace="dreem")
         cm = config_map.data
         min_nodes = int(cm.get("minNodes", min_nodes))
-        max_nodes = int(cm.get("MaxNodes", max_nodes))
+        max_nodes = int(cm.get("maxNodes", max_nodes))
 
 
     except client.exceptions.ApiException as e:
@@ -255,6 +263,10 @@ def main():
                         help='Minutes to wait before starting the first forecast (default: 0)')
     parser.add_argument('--prometheus-url', type=str, default="http://localhost:9090", 
                         help='URL of the Prometheus service')
+    parser.add_argument('--cluster-namespace', type=str, required=True,
+                        help='Namespace where the ClusterAPI cluster is defined')
+    parser.add_argument('--external-cluster-name', type=str, required=True,
+                        help='Name of the external cluster created by CAPI')
     args = parser.parse_args()
     # add prometheus service url
     
@@ -279,7 +291,7 @@ def main():
             continue
         
         active_worker = get_active_worker()
-        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot)
+        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, args.cluster_namespace, args.external_cluster_name)
         print("is enabled?", enabled)
         
         # create the CRD only if the cluster configuration (aka number of nodes) has to be updated

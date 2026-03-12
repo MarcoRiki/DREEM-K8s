@@ -3,6 +3,9 @@ import logging
 import os
 from kubernetes import client
 from kubernetes.dynamic import DynamicClient
+import base64
+import tempfile
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -32,29 +35,65 @@ def load_configuration():
 
 
 
-def get_control_plane_ip():
-
-    k8s_client = client.ApiClient()
-    dyn_client = DynamicClient(k8s_client)
-
-    # Ottieni la risorsa Machine
-    machine_resource = dyn_client.resources.get(api_version="cluster.x-k8s.io/v1beta1", kind="Machine")
-
-    # Lista tutte le Machines nel namespace
-    machines = machine_resource.get()
-    cp=[]
-    for machine in machines.items:
-        labels = machine.metadata.labels or {}
-        #print("a.", labels['cluster.x-k8s.io/control-plane'])
-
-        # Cerca le macchine di tipo control-plane
-        if labels['cluster.x-k8s.io/control-plane'] == "":
-            # Machine ha uno status.addresses
-            addresses = machine.status.addresses or []
-            for address in addresses:
-                if address["type"] == "InternalIP":
-                    cp.append(address["address"])
-
-
-    return cp if cp is not None else None
+def get_control_plane_ip(cluster_namespace, external_cluster_name):
+    """
+    Get control plane IP from the external cluster's Node resources
+    Args:
+        cluster_namespace: namespace where the CAPI cluster is defined
+        external_cluster_name: name of the CAPI cluster
+    """
+    v1 = client.CoreV1Api()
+    
+    try:
+        # Retrieve the kubeconfig secret
+        secret_name = f"{external_cluster_name}-kubeconfig"
+        secret = v1.read_namespaced_secret(name=secret_name, namespace=cluster_namespace)
+        
+        # Decode the kubeconfig from the secret
+        kubeconfig_data = base64.b64decode(secret.data['value']).decode('utf-8')
+        
+        # Write kubeconfig to a temporary file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml') as temp_kubeconfig:
+            temp_kubeconfig.write(kubeconfig_data)
+            temp_kubeconfig_path = temp_kubeconfig.name
+        
+        try:
+            # Load the external cluster configuration
+            external_api_client = config.new_client_from_config(config_file=temp_kubeconfig_path)
+            external_v1 = client.CoreV1Api(external_api_client)
+            
+            # Get Node resources from the external cluster
+            nodes = external_v1.list_node()
+            
+            cp = []
+            for node in nodes.items:
+                labels = node.metadata.labels or {}
+                
+                # Look for control-plane nodes (check both modern and legacy labels)
+                is_control_plane = (
+                    'node-role.kubernetes.io/control-plane' in labels or
+                    'node-role.kubernetes.io/master' in labels
+                )
+                
+                if is_control_plane:
+                    addresses = node.status.addresses or []
+                    for address in addresses:
+                        if address.type == "InternalIP":
+                            cp.append(address.address)
+                            logger.info(f"Found control plane node {node.metadata.name} with IP: {address.address}")
+            
+            if len(cp) == 0:
+                logger.warning(f"No control plane nodes found in cluster {external_cluster_name}")
+                return None
+            
+            return cp
+            
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_kubeconfig_path):
+                os.unlink(temp_kubeconfig_path)
+                
+    except Exception as e:
+        logger.error(f"Error getting control plane IP: {e}")
+        return None
 
