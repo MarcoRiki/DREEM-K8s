@@ -46,9 +46,10 @@ import (
 // NodeSelectingReconciler reconciles a NodeSelecting object
 type NodeSelectingReconciler struct {
 	client.Client
-	ExternalClient client.Client
-	ExternalConfig *rest.Config
-	Scheme         *runtime.Scheme
+	ExternalClient   client.Client
+	ExternalConfig   *rest.Config
+	ClusterNamespace string
+	Scheme           *runtime.Scheme
 }
 
 func (r *NodeSelectingReconciler) handleInitialPhase(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) error {
@@ -302,7 +303,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	}
 
 	selectedNode = rankedNodes[0].Name
-	selectedMD = getMDfromNode(selectedNode, r.Client, ctx)
+	selectedMD = getMDfromNode(selectedNode, r.ClusterNamespace, r.Client, ctx)
 
 	klog.V(2).Info("Scale down selection completed", "selectedNode", selectedNode, "selectedMD", selectedMD)
 	return nil, selectedMD, selectedNode

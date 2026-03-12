@@ -239,10 +239,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.NodeSelectingReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		ExternalClient: externalClient,
-		ExternalConfig: externalConfig,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		ClusterNamespace: clusterNamespace,
+		ExternalClient:   externalClient,
+		ExternalConfig:   externalConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeSelecting")
 		os.Exit(1)

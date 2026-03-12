@@ -1389,10 +1389,10 @@ func SortMachineDeploymentsByCloseness(rankedMDs []RankedMachineDeployment) []Ra
 	return sorted
 }
 
-func getMDfromNode(selectedNode string, k8sclient client.Client, ctx context.Context) string {
+func getMDfromNode(selectedNode string, namespace string, k8sclient client.Client, ctx context.Context) string {
 	// get the machine (clusterapi res) with the name of the node
 	associatedMachine := &clusterapi.Machine{}
-	k8sclient.Get(ctx, client.ObjectKey{Name: selectedNode, Namespace: "default"}, associatedMachine)
+	k8sclient.Get(ctx, client.ObjectKey{Name: selectedNode, Namespace: namespace}, associatedMachine)
 	selectedMD := associatedMachine.Labels[CAPI_MACHINE_DEPLOYMENT_LABEL]
 	return selectedMD
 }
