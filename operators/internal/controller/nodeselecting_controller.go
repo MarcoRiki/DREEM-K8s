@@ -252,7 +252,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 		klog.V(3).Info("Valid after node affinity check:", "count", len(valid), "node", node.Name)
 		valid = CheckTaints(valid)
 		klog.V(3).Info("Valid after taints check:", "count", len(valid), "node", node.Name)
-		klog.V(2).Info("Checking inter-pod affinity", "node", node.Name)
+		klog.V(3).Info("Checking inter-pod affinity", "node", node.Name)
 		valid = CheckInterPodAffinity(ctx, r.Client, valid)
 		klog.V(3).Info("Valid after inter-pod affinity check:", "count", len(valid), "node", node.Name)
 		klog.V(3).Infof("Node %s: %d valid scheduling configurations found after hard-constraints check", node.Name, len(valid))

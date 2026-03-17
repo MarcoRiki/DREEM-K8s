@@ -31,7 +31,7 @@ def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, 
         regex = "|".join(ips_with_port)
         cpu_query = (
             '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-            f'exported_instance!~"{regex}", exported_job="node-exporter"}}[2m])) by (exported_instance)))'
+            f'exported_instance!~"{regex}", exported_job="node-exporter"}}[5m])) by (exported_instance)))'
         )
     else:
         # Se non ci sono control plane IPs, query senza esclusioni
@@ -153,9 +153,11 @@ def LSTM_torch_forecast_CPU(df_instance, model, mean_time_to_boot):
     # Escludi i primi minuti necessari per il boot
     points_to_skip = int(mean_time_to_boot / 5)
     pred_valid = pred_denorm[points_to_skip:] if points_to_skip < len(pred_denorm) else pred_denorm
-    
-    # Ritorna la media del forecast
-    return float(pred_valid.mean())
+    logger.info(f"skipping first {points_to_skip} points due to boot time ({mean_time_to_boot} min), valid predictions: {len(pred_valid)}")
+    logger.info(f"Predicted values (denormalized): {pred_denorm}")
+    logger.info(f"Predicted values after excluding boot time: {pred_valid}")
+    # Ritorna l'90° percentile del forecast
+    return float(np.percentile(pred_valid, 90))
     
 
 def LSTM_univariate_CPU(df, model, mean_time_to_boot):

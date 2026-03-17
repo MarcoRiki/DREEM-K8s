@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir \
     find /usr/local/lib/python3.10/site-packages -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Copia il codice applicativo
-COPY lstm_cpu_model_full.pt .
+COPY lstm_cpu_model_full_att.pt .
 COPY forecast.py .
 COPY utils.py .
 COPY main.py .

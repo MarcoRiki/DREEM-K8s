@@ -15,7 +15,7 @@ from utils import *
 
 
 class LSTMForecast(nn.Module):
-    def __init__(self, hidden=256, layers=3, horizon=30):
+    def __init__(self, hidden=256, layers=3, horizon=30, recency_bias=2.0):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=1,
@@ -23,12 +23,22 @@ class LSTMForecast(nn.Module):
             num_layers=layers,
             batch_first=True
         )
+        self.attn = nn.Linear(hidden, 1)
+        self.recency_bias = recency_bias
         self.fc = nn.Linear(hidden, horizon)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        out = out[:, -1, :]
-        return self.fc(out)
+        if hasattr(self, "attn"):
+            scores = self.attn(out).squeeze(-1)
+        else:
+            scores = torch.zeros(out.size(0), out.size(1), device=out.device)
+        positions = torch.linspace(0.0, 1.0, steps=out.size(1), device=out.device).unsqueeze(0)
+        recency_bias = getattr(self, "recency_bias", 2.0)
+        scores = scores + recency_bias * positions
+        weights = torch.softmax(scores, dim=1)
+        context = torch.sum(out * weights.unsqueeze(-1), dim=1)
+        return self.fc(context)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +76,7 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
         
         # Carica il modello PyTorch
         try:
-            lstm_model = torch.load("lstm_cpu_model_full.pt", weights_only=False, map_location=torch.device('cpu'))
+            lstm_model = torch.load("lstm_cpu_model_full_att.pt", weights_only=False, map_location=torch.device('cpu'))
             lstm_model.eval()
             logger.info("PyTorch LSTM model loaded successfully")
         except Exception as e:

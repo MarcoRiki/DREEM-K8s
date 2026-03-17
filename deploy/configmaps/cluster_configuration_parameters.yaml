@@ -5,6 +5,6 @@ metadata:
   namespace: dreem
 data:
   minNodes: "1"
-  maxNodes: "5" #worker + cp
+  maxNodes: "3" #worker + cp
   selectionProfile: "ENERGY" # NEUTRAL, QOS, ENERGY
 
