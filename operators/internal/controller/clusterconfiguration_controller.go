@@ -83,7 +83,10 @@ func (r *ClusterConfigurationReconciler) handleInitialPhase(ctx context.Context,
 // Handle the stable phase
 func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) error {
 	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
-	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get fresh ClusterConfiguration")
+		return err
+	}
 	log := log.FromContext(ctx).WithName("handle-stable-phase")
 
 	// check  if the number of active nodes is different from the expected number
@@ -188,7 +191,10 @@ func (r *ClusterConfigurationReconciler) handleStablePhase(ctx context.Context, 
 // Handle the selecting phase
 func (r *ClusterConfigurationReconciler) handleSelectingPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) (bool, error) {
 	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
-	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get fresh ClusterConfiguration")
+		return false, err
+	}
 	klog.FromContext(ctx).WithName("handle-selecting-phase")
 	// Implement the logic for handling the selecting phase
 
@@ -255,7 +261,10 @@ func (r *ClusterConfigurationReconciler) handleSelectingPhase(ctx context.Contex
 // Handle the switching phase
 func (r *ClusterConfigurationReconciler) handleSwitchingPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) (bool, error) {
 	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
-	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get fresh ClusterConfiguration")
+		return false, err
+	}
 
 	klog.FromContext(ctx).WithName("handle-switching-phase")
 	// Implement the logic for handling the switching phase
@@ -315,7 +324,10 @@ func (r *ClusterConfigurationReconciler) handleSwitchingPhase(ctx context.Contex
 // Handle the failed phase
 func (r *ClusterConfigurationReconciler) handleFailedPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) error {
 	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
-	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get fresh ClusterConfiguration")
+		return err
+	}
 	klog.FromContext(ctx).WithName("handle-failed-phase")
 	// Implement the logic for handling the failed phase
 	klog.V(2).InfoS("Failed phase for ClusterConfiguration",
@@ -327,7 +339,10 @@ func (r *ClusterConfigurationReconciler) handleFailedPhase(ctx context.Context, 
 // Handle the completed phase
 func (r *ClusterConfigurationReconciler) handleCompletedPhase(ctx context.Context, clusterConfiguration *clusterv1alpha1.ClusterConfiguration) error {
 	var clusterConfig = &clusterv1alpha1.ClusterConfiguration{}
-	r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clusterConfiguration), clusterConfig); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get fresh ClusterConfiguration")
+		return err
+	}
 	klog.FromContext(ctx).WithName("handle-completed-phase")
 	// Implement the logic for handling the completed phase
 
@@ -370,9 +385,10 @@ func (r *ClusterConfigurationReconciler) Reconcile(ctx context.Context, req ctrl
 	// Fetch the ClusterConfiguration instance
 	clusterConfig := &clusterv1alpha1.ClusterConfiguration{}
 	if err := r.Get(ctx, req.NamespacedName, clusterConfig); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: timeout}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
 		}
+		return ctrl.Result{RequeueAfter: timeout}, err
 	}
 	// Log the reconciliation request
 	klog.V(1).InfoS("Reconciling ClusterConfiguration", "name", clusterConfig.Name, "namespace", clusterConfig.Namespace)
@@ -517,7 +533,6 @@ func (r *ClusterConfigurationReconciler) CreateNodeSelecting(ctx context.Context
 		log.Error(err, "unable to create NodeSelecting CRD")
 		return err
 	}
-	ctrl.SetControllerReference(&clusterConfig, nodeSelecting, r.Scheme)
 
 	log.Info("NodeSelecting CRD created", "name", nodeSelecting.Name)
 	return nil

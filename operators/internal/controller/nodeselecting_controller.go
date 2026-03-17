@@ -208,11 +208,13 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	// for each node, check the pods that must be migrated
 	for _, node := range nodeList.Items {
 
+		klog.V(2).Info("Getting migratable pods for node", "node", node.Name)
 		podToScheduleList, err := r.getMigratablePodsOnNode(ctx, node.Name)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to get migratable pods on node", "node", node.Name)
 			continue
 		}
+		klog.V(2).Info("Got migratable pods", "node", node.Name, "count", len(podToScheduleList))
 		//fmt.Print("Pod to schedule list for node ", node.Name, ":\n")
 		// for _, p := range podToScheduleList {
 		// 	fmt.Print(" - ", p.Name, "\n")
@@ -238,7 +240,9 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 		}
 
 		// Generate all scheduling combinations
+		klog.V(2).Info("Generating combinations", "node", node.Name, "candidates", len(candidateNodes.Items))
 		combinations := GenerateCombinations(podToScheduleList, candidateNodes.Items)
+		klog.V(2).Info("Generated combinations", "node", node.Name, "count", len(combinations))
 
 		// check hard-constraints
 
@@ -248,6 +252,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 		klog.V(3).Info("Valid after node affinity check:", "count", len(valid), "node", node.Name)
 		valid = CheckTaints(valid)
 		klog.V(3).Info("Valid after taints check:", "count", len(valid), "node", node.Name)
+		klog.V(2).Info("Checking inter-pod affinity", "node", node.Name)
 		valid = CheckInterPodAffinity(ctx, r.Client, valid)
 		klog.V(3).Info("Valid after inter-pod affinity check:", "count", len(valid), "node", node.Name)
 		klog.V(3).Infof("Node %s: %d valid scheduling configurations found after hard-constraints check", node.Name, len(valid))
@@ -318,7 +323,9 @@ func (r *NodeSelectingReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, nodeSelecting); err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.V(1).Info("NodeSelecting resource not found, ignoring since object must be deleted")
+			return ctrl.Result{}, nil
 		}
+		return ctrl.Result{}, err
 	}
 	klog.V(1).Info("Reconciling NodeSelecting resource", "name", nodeSelecting.Name)
 

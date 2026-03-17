@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -28,7 +30,9 @@ type Assignment struct {
 
 type Combination []Assignment
 
-// Generate all combinations of assigning pods to candidate nodes.
+// Generate combinations of assigning pods to candidate nodes.
+// With many pods, this becomes exponential (nodes^pods). To avoid memory issues,
+// we limit the combinations and use sampling if necessary.
 func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node) []Combination {
 	if len(nodes) == 0 {
 		return nil
@@ -40,6 +44,13 @@ func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node) []Combination 
 	numPods := len(pods)
 	numNodes := len(nodes)
 	total := pow(numNodes, numPods) // combinazioni totali = numNodes^numPods
+
+	// Limit combinations to avoid memory exhaustion
+	const maxCombinations = 10000
+	if total > maxCombinations {
+		klog.V(2).Infof("Too many combinations (%d > %d), sampling subset for pods=%d nodes=%d", total, maxCombinations, numPods, numNodes)
+		return sampleCombinations(pods, nodes, maxCombinations)
+	}
 
 	combinations := make([]Combination, 0, total)
 
@@ -58,6 +69,29 @@ func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node) []Combination 
 			}
 		}
 
+		combinations = append(combinations, comb)
+	}
+
+	return combinations
+}
+
+// sampleCombinations randomly samples a subset of combinations instead of generating all
+func sampleCombinations(pods []corev1.Pod, nodes []corev1.Node, maxSamples int) []Combination {
+	numPods := len(pods)
+	numNodes := len(nodes)
+	combinations := make([]Combination, 0, maxSamples)
+
+	// Sample random combinations
+	for i := 0; i < maxSamples; i++ {
+		comb := make(Combination, numPods)
+		for p := 0; p < numPods; p++ {
+			randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(numNodes)))
+			nodeIndex := int(randIdx.Int64())
+			comb[p] = Assignment{
+				Pod:  pods[p],
+				Node: nodes[nodeIndex],
+			}
+		}
 		combinations = append(combinations, comb)
 	}
 
