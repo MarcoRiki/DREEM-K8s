@@ -307,7 +307,7 @@ def main():
         # create the CRD only if the cluster configuration (aka number of nodes) has to be updated
         if scaling_label != 0 and scaling_label is not None:
             required_worker= active_worker + scaling_label
-            if required_worker >= int(min_nodes) and required_worker < int(max_nodes):
+            if required_worker >= int(min_nodes) and required_worker <= int(max_nodes):
                 create_cluster_configuration(required_worker, min_nodes, max_nodes)
             else:
                 logger.info("reached infrastructure constaints, scaling not possible")

@@ -50,7 +50,7 @@ const (
 // ClusterConfigurationStatus defines the observed state of ClusterConfiguration.
 type ClusterConfigurationStatus struct {
 
-	// Numeber of active worker at the moment of the resource creation
+	// Number of active worker at the moment of the resource creation
 	ActiveNodes int32 `json:"activeNodes"`
 
 	// Execution phase of the resource
@@ -62,6 +62,9 @@ type ClusterConfigurationStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="#Required",type=integer,JSONPath=`.spec.requiredNodes`
+// +kubebuilder:printcolumn:name="#Active",type=integer,JSONPath=`.status.activeNodes`
 
 // ClusterConfiguration is the Schema for the clusterconfigurations API.
 type ClusterConfiguration struct {

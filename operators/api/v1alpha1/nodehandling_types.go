@@ -59,6 +59,9 @@ type NodeHandlingStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="ClusterConf",type=string,JSONPath=`.spec.clusterConfigurationName`
+// +kubebuilder:printcolumn:name="Scaling Label",type=integer,JSONPath=`.spec.scalingLabel`
 
 // NodeHandling is the Schema for the nodehandlings API.
 type NodeHandling struct {
