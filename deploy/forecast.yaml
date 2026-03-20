@@ -18,8 +18,8 @@ spec:
       serviceAccountName: forecast-sa
       containers:
       - name: forecast
-        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/forecast:0.0.14
-        args: ["--start-after", "0", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090", "--cluster-namespace", "default", "--external-cluster-name", "dreem-mmiracapillo-cluster"]  
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/forecast:0.0.17
+        args: ["--start-after", "5", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090", "--cluster-namespace", "metal3", "--external-cluster-name", "test1"]  
 
 ---
 apiVersion: v1

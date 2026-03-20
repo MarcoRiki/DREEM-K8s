@@ -65,7 +65,8 @@ spec:
           - --health-probe-bind-address=:8081
           - --external-cluster-name=dreem-mmiracapillo-cluster
           - --cluster-namespace=default
-        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.7
+          - --max-configurations=10000
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.9
         imagePullPolicy: IfNotPresent
         
         name: manager
@@ -91,11 +92,11 @@ spec:
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
-            cpu: 500m
-            memory: 128Mi
+            cpu: 1500m
+            memory: 2048Mi
           requests:
-            cpu: 10m
-            memory: 64Mi
+            cpu: 512m
+            memory: 512Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager

@@ -191,6 +191,7 @@ def read_forecast_cm():
     model = "LSTM"
     mean_time_to_boot = 1
     enabled = True
+    stabilization_cycles = 1
 
     # update the CM if values are present
     v1 = client.CoreV1Api()
@@ -207,11 +208,12 @@ def read_forecast_cm():
         model = cm.get("Prediction_model", model)
         mean_time_to_boot = int(cm.get("Mean_time_to_boot", mean_time_to_boot))
         enabled = cm.get("Enabled", str(enabled)) == "true"
+        stabilization_cycles = int(cm.get("Stabilization_cycles", stabilization_cycles))
     except client.exceptions.ApiException as e:
         logging.error(f"Error during the reading of the ConfigMap: {e}")
         return None
 
-    return  past_time_window,future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot, enabled
+    return  past_time_window,future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot, enabled, stabilization_cycles
 
 def read_cluster_configuration_cm():
     """
@@ -283,18 +285,21 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     utils.load_configuration()
 
-    past_time_window, future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot, enabled = read_forecast_cm()
     prometheus_url = args.prometheus_url
 
-    min_nodes, max_nodes = read_cluster_configuration_cm()
 
     # Sleep iniziale prima del primo forecast
     if args.start_after > 0:
         logger.info(f"Waiting {args.start_after} minutes before starting first forecast")
         time.sleep(args.start_after * 60)
 
+    # Stabilization mechanism: track consecutive occurrences of same scaling_label
+    previous_scaling_label = None
+    scaling_label_count = 0
+
     while True:
-        
+        past_time_window, future_time_window, min_threshold, max_threshold, forecast_period_in_minutes, model, mean_time_to_boot, enabled, stabilization_cycles = read_forecast_cm()
+        prometheus_url = args.prometheus_url
         if not enabled:
             logger.info("forecast is disabled, skipping forecast and scaling")
             time.sleep(forecast_period_in_minutes * 60)
@@ -302,17 +307,30 @@ def main():
         
         active_worker = get_active_worker()
         scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, args.cluster_namespace, args.external_cluster_name)
-        print("is enabled?", enabled)
+        min_nodes, max_nodes = read_cluster_configuration_cm()
+        
+        # Stabilization logic: only create ClusterConfiguration if scaling_label is stable (same value for 2 consecutive cycles)
+        if scaling_label == previous_scaling_label:
+            scaling_label_count += 1
+        else:
+            scaling_label_count = 1
+            previous_scaling_label = scaling_label
+        
+        logger.info(f"Scaling label: {scaling_label} (stable for {scaling_label_count} cycle(s))")
         
         # create the CRD only if the cluster configuration (aka number of nodes) has to be updated
-        if scaling_label != 0 and scaling_label is not None:
+        # and the scaling_label has been stable for at least 2 consecutive cycles
+        if scaling_label != 0 and scaling_label is not None and scaling_label_count >= stabilization_cycles:
             required_worker= active_worker + scaling_label
             if required_worker >= int(min_nodes) and required_worker <= int(max_nodes):
                 create_cluster_configuration(required_worker, min_nodes, max_nodes)
+                # Reset counter after creating a ClusterConfiguration
+                scaling_label_count = 0
             else:
                 logger.info("reached infrastructure constaints, scaling not possible")
         logger.info(f"forecast finished, next forecast in {forecast_period_in_minutes} minutes")
         time.sleep(forecast_period_in_minutes * 60)
+
 
 
 if __name__ == "__main__":

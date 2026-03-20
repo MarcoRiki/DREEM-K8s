@@ -62,6 +62,8 @@ type NodeSelectingStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="ClusterConf",type=string,JSONPath=`.spec.clusterConfigurationName`
 // +kubebuilder:printcolumn:name="ScalingLabel",type=integer,JSONPath=`.spec.scalingLabel`
+// +kubebuilder:printcolumn:name="SelectedMD",type=string,JSONPath=`.status.selectedMachineDeployment`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NodeSelecting is the Schema for the nodeselectings API.
 type NodeSelecting struct {

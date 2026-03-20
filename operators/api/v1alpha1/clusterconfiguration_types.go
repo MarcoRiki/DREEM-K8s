@@ -65,6 +65,7 @@ type ClusterConfigurationStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="#Required",type=integer,JSONPath=`.spec.requiredNodes`
 // +kubebuilder:printcolumn:name="#Active",type=integer,JSONPath=`.status.activeNodes`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ClusterConfiguration is the Schema for the clusterconfigurations API.
 type ClusterConfiguration struct {

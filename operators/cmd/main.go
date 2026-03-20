@@ -81,10 +81,13 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	var externalClusterName string
 	var clusterNamespace string
+	var maxNumberOfConfigurations int
 	flag.StringVar(&externalClusterName, "external-cluster-name", "external-cluster",
 		"The name of the external cluster to connect to.")
 	flag.StringVar(&clusterNamespace, "cluster-namespace", "default",
 		"The namespace where the external cluster secret is located.")
+	flag.IntVar(&maxNumberOfConfigurations, "max-configurations", 10000,
+		"The maximum number of configurations to consider during the selection process.")
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -239,11 +242,12 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.NodeSelectingReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		ClusterNamespace: clusterNamespace,
-		ExternalClient:   externalClient,
-		ExternalConfig:   externalConfig,
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		ClusterNamespace:          clusterNamespace,
+		ExternalClient:            externalClient,
+		ExternalConfig:            externalConfig,
+		MaxNumberOfConfigurations: maxNumberOfConfigurations,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeSelecting")
 		os.Exit(1)

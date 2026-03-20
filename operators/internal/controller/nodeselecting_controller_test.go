@@ -34,6 +34,7 @@ import (
 	clusterapi "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
+var MaxNumberOfConfigurations = 10000
 var nodeSmallName = "node-small"
 var providerID = "provider-test"
 var nodeSmall = corev1.Node{
@@ -715,7 +716,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeSmall)
 			nodeList = append(nodeList, nodeLarge)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			fmt.Fprintf(GinkgoWriter, "combinations: %+v\n", combinations)
 
 			Expect(len(combinations)).To(Equal(4))
@@ -728,7 +729,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeSmall)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			validCombinations := controller.CheckResources(combinations)
 
 			Expect(len(validCombinations)).To(Equal(0))
@@ -740,7 +741,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podSmallNginx, podBigNginx, podMediumNginx)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeLarge, nodeSmall)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			By("Checking the resources")
 			validCombinations := controller.CheckResources(combinations)
 			Expect(len(validCombinations)).To(Equal(2))
@@ -758,7 +759,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podSmallNginx, podMediumNginx)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeLarge)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			validCombinations := controller.CheckNodeAffinity(combinations)
 			Expect(len(validCombinations)).To(Equal(1))
 			shouldBeValid := []controller.Combination{
@@ -774,7 +775,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podAffinity_A, podAffinity_B)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeAffinity_A, *nodeAffinity_A.DeepCopy(), nodeLarge)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			By("checking affinity")
 			validCombinations := controller.CheckNodeAffinity(combinations)
 			Expect(len(validCombinations)).To(Equal(2))
@@ -793,7 +794,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podAffinity_A)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeAffinity_B)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			By("checking affinity")
 			validCombinations := controller.CheckNodeAffinity(combinations)
 			Expect(len(validCombinations)).To(Equal(0))
@@ -806,7 +807,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podAffinity_A, podAffinity_B)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeAffinity_A, nodeAffinity_B)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			By("checking affinity")
 			validCombinations := controller.CheckNodeAffinity(combinations)
 			Expect(len(validCombinations)).To(Equal(1))
@@ -825,7 +826,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			nodeList = append(nodeList, nodeTainted_A)
 
 			By("Checking taints")
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 			validCombinations := controller.CheckTaints(combinations)
 			Expect(len(validCombinations)).To(Equal(0))
 
@@ -847,7 +848,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podWithInterPodAffinity)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeLarge)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 
 			By("Checking interpod affinity")
 			validCombinations := controller.CheckInterPodAffinity(ctx, k8sClient, combinations)
@@ -876,7 +877,7 @@ var _ = Describe("NodeSelecting Controller", func() {
 			podList = append(podList, podWithInterPodAntiAffinity)
 			nodeList := []corev1.Node{}
 			nodeList = append(nodeList, nodeLarge)
-			combinations := controller.GenerateCombinations(podList, nodeList)
+			combinations := controller.GenerateCombinations(podList, nodeList, MaxNumberOfConfigurations)
 
 			By("Checking interpod antiaffinity")
 			validCombinations := controller.CheckInterPodAffinity(ctx, k8sClient, combinations)

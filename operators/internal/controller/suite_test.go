@@ -100,9 +100,10 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&controller.NodeSelectingReconciler{
-		Client:         k8sClient,
-		Scheme:         scheme.Scheme,
-		ExternalConfig: cfg,
+		Client:                    k8sClient,
+		Scheme:                    scheme.Scheme,
+		ExternalConfig:            cfg,
+		MaxNumberOfConfigurations: 10000,
 	}).SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
 

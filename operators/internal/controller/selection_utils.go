@@ -33,7 +33,7 @@ type Combination []Assignment
 // Generate combinations of assigning pods to candidate nodes.
 // With many pods, this becomes exponential (nodes^pods). To avoid memory issues,
 // we limit the combinations and use sampling if necessary.
-func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node) []Combination {
+func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node, maxCombinations int) []Combination {
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -46,7 +46,6 @@ func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node) []Combination 
 	total := pow(numNodes, numPods) // combinazioni totali = numNodes^numPods
 
 	// Limit combinations to avoid memory exhaustion
-	const maxCombinations = 10000
 	if total > maxCombinations {
 		klog.V(2).Infof("Too many combinations (%d > %d), sampling subset for pods=%d nodes=%d", total, maxCombinations, numPods, numNodes)
 		return sampleCombinations(pods, nodes, maxCombinations)

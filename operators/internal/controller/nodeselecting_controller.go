@@ -46,10 +46,11 @@ import (
 // NodeSelectingReconciler reconciles a NodeSelecting object
 type NodeSelectingReconciler struct {
 	client.Client
-	ExternalClient   client.Client
-	ExternalConfig   *rest.Config
-	ClusterNamespace string
-	Scheme           *runtime.Scheme
+	ExternalClient            client.Client
+	ExternalConfig            *rest.Config
+	MaxNumberOfConfigurations int
+	ClusterNamespace          string
+	Scheme                    *runtime.Scheme
 }
 
 func (r *NodeSelectingReconciler) handleInitialPhase(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) error {
@@ -241,7 +242,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 
 		// Generate all scheduling combinations
 		klog.V(2).Info("Generating combinations", "node", node.Name, "candidates", len(candidateNodes.Items))
-		combinations := GenerateCombinations(podToScheduleList, candidateNodes.Items)
+		combinations := GenerateCombinations(podToScheduleList, candidateNodes.Items, r.MaxNumberOfConfigurations)
 		klog.V(2).Info("Generated combinations", "node", node.Name, "count", len(combinations))
 
 		// check hard-constraints
