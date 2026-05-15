@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	klog "k8s.io/klog/v2"
 
@@ -82,12 +83,24 @@ func main() {
 	var externalClusterName string
 	var clusterNamespace string
 	var maxNumberOfConfigurations int
+	var leaseDuration int
+	var renewDeadline int
+	var retryPeriod int
+	var apiServerTimeout int
 	flag.StringVar(&externalClusterName, "external-cluster-name", "external-cluster",
 		"The name of the external cluster to connect to.")
 	flag.StringVar(&clusterNamespace, "cluster-namespace", "default",
 		"The namespace where the external cluster secret is located.")
 	flag.IntVar(&maxNumberOfConfigurations, "max-configurations", 10000,
 		"The maximum number of configurations to consider during the selection process.")
+	flag.IntVar(&leaseDuration, "lease-duration", 120,
+		"The duration in seconds that non-leader candidates will wait to force acquire leadership.")
+	flag.IntVar(&renewDeadline, "renew-deadline", 60,
+		"The duration in seconds that the acting leader will retry refreshing leadership before giving up.")
+	flag.IntVar(&retryPeriod, "retry-period", 5,
+		"The duration in seconds that LeaderElection clients should wait between tries of actions.")
+	flag.IntVar(&apiServerTimeout, "api-server-timeout", 120,
+		"The timeout in seconds for API server requests.")
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -204,13 +217,19 @@ func main() {
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	cfg.Timeout = time.Duration(apiServerTimeout) * time.Second
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "db2bcae8.dreemk8s",
+		LeaseDuration:          ptr(time.Duration(leaseDuration) * time.Second),
+		RenewDeadline:          ptr(time.Duration(renewDeadline) * time.Second),
+		RetryPeriod:            ptr(time.Duration(retryPeriod) * time.Second),
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -335,4 +354,9 @@ func getExternalClient(clustername string, namespace string, cfg *rest.Config, c
 	}
 
 	return cl, externalCfg, nil
+}
+
+// ptr is a helper function to return a pointer to a value
+func ptr[T any](v T) *T {
+	return &v
 }
