@@ -34,7 +34,7 @@ class LSTMForecast(nn.Module):
         else:
             scores = torch.zeros(out.size(0), out.size(1), device=out.device)
         positions = torch.linspace(0.0, 1.0, steps=out.size(1), device=out.device).unsqueeze(0)
-        recency_bias = getattr(self, "recency_bias", 2.0)
+        recency_bias = getattr(self, "recency_bias", 5.0)
         scores = scores + recency_bias * positions
         weights = torch.softmax(scores, dim=1)
         context = torch.sum(out * weights.unsqueeze(-1), dim=1)
@@ -42,7 +42,7 @@ class LSTMForecast(nn.Module):
 
 logger = logging.getLogger(__name__)
 
-def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, cluster_namespace, external_cluster_name):
+def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, cluster_namespace, external_cluster_name, rate_interval="5m"):
     """
     The function returns the number of nodes that must be turned on (positive number) or off (negative number)
     """
@@ -55,6 +55,9 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
         df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, external_cluster_name)
         if err:
             logger.error("error in loading data for forecast")
+            return 0
+        if df_cpu.empty:
+            logger.info("No active instances found. Skipping scaling decision.")
             return 0
         predicted_cpu_per_instance = []
         grouped = df_cpu.groupby('instance')
@@ -69,14 +72,17 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
     elif model == "LSTM":
 
         logger.info("LSTM CPU prediction is started")
-        df_cpu, err = load_data_instance_cpu(prometheus_url, INPUT_TIME, cluster_namespace, external_cluster_name)
+        df_cpu, err = load_data_instance_cpu(prometheus_url, INPUT_TIME, cluster_namespace, external_cluster_name, rate_interval)
         if err:
             logger.error("error in loading data for forecast")
+            return 0
+        if df_cpu.empty:
+            logger.info("No active instances found. Skipping scaling decision.")
             return 0
         
         # Carica il modello PyTorch
         try:
-            lstm_model = torch.load("lstm_cpu_model_full_att.pt", weights_only=False, map_location=torch.device('cpu'))
+            lstm_model = torch.load("lstm_cpu_model_full_att_bias5.pt", weights_only=False, map_location=torch.device('cpu'))
             lstm_model.eval()
             logger.info("PyTorch LSTM model loaded successfully")
         except Exception as e:
@@ -279,6 +285,8 @@ def main():
                         help='Namespace where the ClusterAPI cluster is defined')
     parser.add_argument('--external-cluster-name', type=str, required=True,
                         help='Name of the external cluster created by CAPI')
+    parser.add_argument('--rate-interval', type=str, default="5m",
+                        help='Interval for Prometheus rate function (default: 5m)')
     args = parser.parse_args()
     # add prometheus service url
     
@@ -306,7 +314,7 @@ def main():
             continue
         
         active_worker = get_active_worker()
-        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, args.cluster_namespace, args.external_cluster_name)
+        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, args.cluster_namespace, args.external_cluster_name, args.rate_interval)
         min_nodes, max_nodes = read_cluster_configuration_cm()
         
         # Stabilization logic: only create ClusterConfiguration if scaling_label is stable (same value for 2 consecutive cycles)

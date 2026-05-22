@@ -11,9 +11,11 @@ import logging
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
+ACTIVE_INSTANCE_STALENESS_MINUTES = 5
+INITIAL_BOOT_SPIKE_EXCLUSION_MINUTES = 5
 
 
-def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, external_cluster_name):
+def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, external_cluster_name, rate_interval="5m"):
     """
     This function perform the query to retrieve the data of the CPU load in order to make prediction.
     Query: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[RATE_INTERVAL])))'
@@ -31,14 +33,14 @@ def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, 
         regex = "|".join(ips_with_port)
         cpu_query = (
             '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-            f'exported_instance!~"{regex}", exported_job="node-exporter"}}[5m])) by (exported_instance)))'
+            f'exported_instance!~"{regex}", exported_job="node-exporter"}}[{rate_interval}])) by (exported_instance)))'
         )
     else:
         # Se non ci sono control plane IPs, query senza esclusioni
         logger.warning("No control plane IPs found, querying all instances")
         cpu_query = (
             '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-            'exported_job="node-exporter"}[2m])) by (exported_instance)))'
+            f'exported_job="node-exporter"}}[{rate_interval}])) by (exported_instance)))'
         )
     
     logger.info(f"Constructed PromQL query: {cpu_query}")
@@ -60,8 +62,28 @@ def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, 
     logger.info("CPU query has data")
 
     data = []
+    active_results = []
+    staleness_delta = datetime.timedelta(minutes=ACTIVE_INSTANCE_STALENESS_MINUTES)
 
     for metric in results:
+        metric_values = metric.get('values', [])
+        if len(metric_values) == 0:
+            continue
+        last_timestamp = datetime.datetime.fromtimestamp(float(metric_values[-1][0]))
+        if (end_time - last_timestamp) > staleness_delta:
+            instance = metric.get('metric', {}).get('exported_instance', 'unknown')
+            logger.info(
+                f"Skipping inactive instance {instance}: last sample at {last_timestamp} "
+                f"(older than {ACTIVE_INSTANCE_STALENESS_MINUTES} minutes)"
+            )
+            continue
+        active_results.append(metric)
+
+    if not active_results:
+        logger.info("No active instances found in Prometheus data")
+        return pd.DataFrame(), False
+
+    for metric in active_results:
         instance = metric['metric']['exported_instance']
         for timestamp, value in metric['values']:
             data.append({
@@ -85,8 +107,8 @@ def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, 
         dfs_resampled.append(df_resampled)
 
     df_final = pd.concat(dfs_resampled, ignore_index=True)
-    logger.info(f"Resampled data to 5min intervals: {len(df_final)} rows for {len(dfs_resampled)} instances")
-
+    logger.info(f"Resampled data to 5min intervals: {len(df_final)} rows for {len(dfs_resampled)} active instances")
+    logger.info(f"Data for instance {dfs_resampled[0]['instance'].iloc[0]}:\n{dfs_resampled[0]}")
     return df_final, False
 
 
@@ -124,16 +146,27 @@ def LSTM_torch_forecast_CPU(df_instance, model, mean_time_to_boot):
         Media del forecast escludendo il tempo di boot
     """
     # Valori di normalizzazione dal training (dal notebook)
-    cpu_mean = 37.661774760007766
-    cpu_std = 15.296503574604664
+    cpu_mean = 37.79564544397033
+    cpu_std = 15.240312102102822
     
     # Estrai la serie CPU
     cpu_series = df_instance['cpu_util_percent'].values
     
     # Verifica che ci siano abbastanza dati
     if len(cpu_series) < INPUT_WINDOW:
-        logger.warning(f"Not enough data for forecast: {len(cpu_series)} < {INPUT_WINDOW}. Returning last value.")
-        return None
+        if len(cpu_series) == 0:
+            logger.warning("No data available for forecast. Returning None.")
+            return None
+
+        points_to_skip = int(INITIAL_BOOT_SPIKE_EXCLUSION_MINUTES / 5)
+        observed_valid = cpu_series[points_to_skip:] if points_to_skip < len(cpu_series) else cpu_series
+        fallback_pred = float(np.percentile(observed_valid, 50))
+        logger.warning(
+            f"Not enough data for LSTM forecast: {len(cpu_series)} < {INPUT_WINDOW}. "
+            f"Using fallback from observed data after excluding first {INITIAL_BOOT_SPIKE_EXCLUSION_MINUTES} minutes "
+            f"(p90={fallback_pred:.2f}%)."
+        )
+        return fallback_pred
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
