@@ -32,7 +32,20 @@ func getNumberOfWorkerNodes(ctx context.Context, k8sClient client.Client) (int32
 
 	var numberOfWorkerNodes int32
 	for _, node := range nodes.Items {
-		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; !isControlPlane {
+		// skip control plane nodes
+		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; isControlPlane {
+			continue
+		}
+
+		// count only if node is Ready
+		isReady := false
+		for _, cond := range node.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+				isReady = true
+				break
+			}
+		}
+		if isReady {
 			numberOfWorkerNodes++
 		}
 	}

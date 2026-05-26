@@ -19,6 +19,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -246,7 +247,11 @@ func performPowerCycleAction(ctx context.Context, username string, password stri
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth(username, password)
 
-	client := &http.Client{}
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("Failed to perform HTTP request to Redfish API: %v", err)

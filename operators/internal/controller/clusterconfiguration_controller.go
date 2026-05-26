@@ -342,7 +342,7 @@ func (r *ClusterConfigurationReconciler) handleCompletedPhase(ctx context.Contex
 
 	updatedNumberOfWorker, err := getNumberOfWorkerNodes(ctx, r.Client)
 	if err != nil {
-		klog.V(2).ErrorS(err, "Failed to get the number of MachineDeployments")
+		klog.V(2).ErrorS(err, "Failed to get the number of Nodes")
 		return err
 	}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
