@@ -17,11 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"strconv"
+	"net/http"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -31,7 +34,6 @@ import (
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
 // NodeHandlingReconciler reconciles a NodeHandling object
@@ -44,11 +46,7 @@ type NodeHandlingReconciler struct {
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandlings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandlings/finalizers,verbs=update
 
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch;update
 
 func (r *NodeHandlingReconciler) handleInitialPhase(ctx context.Context, nodeHandling *clusterv1alpha1.NodeHandling) error {
 	klog.FromContext(ctx).WithName("handle-initial-phase")
@@ -82,14 +80,12 @@ func (r *NodeHandlingReconciler) handleInitialPhase(ctx context.Context, nodeHan
 func (r *NodeHandlingReconciler) handleRunningPhase(ctx context.Context, nodeHandling *clusterv1alpha1.NodeHandling) error {
 	klog.FromContext(ctx).WithName("handle-running-phase")
 
-	klog.V(2).Info("Calling Cluster API", "name", nodeHandling.Name)
-
 	if nodeHandling.Spec.ScalingLabel > 0 {
 		klog.V(2).Info("NodeHandling has to scale up", "name", nodeHandling.Name)
-		err := r.scaleUp(ctx, nodeHandling.Spec.ScalingLabel, nodeHandling.Spec.SelectedMachineDeployment)
+		err := r.scaleUp(ctx, nodeHandling.Spec.ScalingLabel, nodeHandling.Spec.SelectedNode)
 		if err != nil {
 			nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
-			nodeHandling.Status.Message = "Failed scaling up cluster"
+			nodeHandling.Status.Message = "Failed scaling up cluster with selected node " + nodeHandling.Spec.SelectedNode
 			if updateErr := r.Status().Update(ctx, nodeHandling); updateErr != nil {
 				klog.V(2).ErrorS(updateErr, "Failed to update NodeHandling status to Failed", "name", nodeHandling.Name)
 				return updateErr
@@ -99,7 +95,7 @@ func (r *NodeHandlingReconciler) handleRunningPhase(ctx context.Context, nodeHan
 		}
 	} else if nodeHandling.Spec.ScalingLabel < 0 {
 		klog.V(2).Info("NodeHandling has to scale down", "name", nodeHandling.Name)
-		err := r.scaleDown(ctx, nodeHandling.Spec.SelectedNode, nodeHandling.Spec.SelectedMachineDeployment, nodeHandling.Spec.ScalingLabel)
+		err := r.scaleDown(ctx, nodeHandling.Spec.SelectedNode, nodeHandling.Spec.ScalingLabel)
 
 		if err != nil {
 			nodeHandling.Status.Phase = clusterv1alpha1.NH_PhaseFailed
@@ -175,206 +171,135 @@ func (r *NodeHandlingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}).
 		Complete(r)
 }
-func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32, selectedMD_string string) error {
+func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32, selectedNode_string string) error {
 	klog.FromContext(ctx).WithName("scale-up")
 
-	// get the MachineDeployment and update the replicas
-	machineDeploymentList := &clusterv1.MachineDeploymentList{}
-	if err := r.List(ctx, machineDeploymentList); err != nil {
-		klog.V(2).ErrorS(err, "Failed to list MachineDeployments")
+	// get the secret to access the BMC of the node and perform the power cycle action through Redfish API
+	credentialSecret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: "bmc-credentials-" + selectedNode_string, Namespace: "dreem"}, credentialSecret); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get BMC credentials secret for node "+selectedNode_string)
 		return err
 	}
 
-	if len(machineDeploymentList.Items) == 0 {
-		klog.V(2).Info("No MachineDeployments found")
-		return nil
-	}
+	node_bmc_ip := string(credentialSecret.Data["bmc_address"])
 
-	machineDeployment := &clusterv1.MachineDeployment{}
-	if selectedMD_string != "" {
-		// If a specific MachineDeployment is selected, use it
-		for _, md := range machineDeploymentList.Items {
-			if md.Name == selectedMD_string {
-				machineDeployment = &md
-				break
-			}
-		}
-	}
-	clusterNamespace := machineDeployment.Namespace
-	machineDeploymentName := machineDeployment.Name
+	// perform the power cycle action through Redfish API
+	endpoint := fmt.Sprintf(TEMPLATE_REDFISH_ENDPOINT, node_bmc_ip, string(credentialSecret.Data["id"]))
+	err := performPowerCycleAction(ctx, string(credentialSecret.Data["username"]), string(credentialSecret.Data["password"]), endpoint, "ON")
 
-	var newReplicas int32
-	if machineDeployment.Spec.Replicas != nil {
-		newReplicas = *machineDeployment.Spec.Replicas + scalingLabel
-	} else {
-		newReplicas = scalingLabel
-	}
-	klog.V(2).Info("Scaling MachineDeployment", "name", machineDeployment.Name,
-		"currentReplicas", machineDeployment.Spec.Replicas,
-		"desiredReplicas", newReplicas)
-	machineDeployment.Spec.Replicas = &newReplicas
-
-	if err := r.Update(ctx, machineDeployment); err != nil {
-		klog.V(2).ErrorS(err, "Failed to update MachineDeployment replicas", "name", machineDeploymentName)
-		return err
-	}
-
-	klog.V(2).Info("Waiting for MachineDeployment to have desired number of ReadyReplicas", "desiredReplicas", newReplicas)
-	// Wait until ReadyReplicas matches the desired replicas
+	klog.V(2).Info("Waiting for the node " + selectedNode_string + " to become Ready")
 	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 
 	pollInterval := 10 * time.Second
-	err := wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
-		md := &clusterv1.MachineDeployment{}
-		if err := r.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: clusterNamespace}, md); err != nil {
+	err = wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
+		node := &corev1.Node{}
+		if err := r.Get(ctx, client.ObjectKey{Name: selectedNode_string}, node); err != nil {
 			return false, err
 		}
 
-		klog.V(2).Info("Polling MachineDeployment status", "name", machineDeploymentName, "ReadyReplicas", md.Status.ReadyReplicas, "DesiredReplicas", newReplicas)
-
-		if md.Status.ReadyReplicas == newReplicas {
-			klog.V(1).Info("MachineDeployment successfully scaled", "replicas", md.Status.ReadyReplicas)
-
-			// upadate the cyclecount annotation for the MachineDeployment
-			if md.Annotations == nil {
-				md.Annotations = make(map[string]string)
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+				klog.V(2).Info("Node " + selectedNode_string + " is Ready")
+				return true, nil
 			}
-			cycleCount := 1
-			if val, ok := md.Annotations[DREEM_POWER_CYCLE_ANNOTATION]; ok {
-				var err error
-				cycleCount, err = strconv.Atoi(val)
-				if err != nil {
-					klog.V(2).ErrorS(err, "Failed to convert cycle-count annotation to int", "value", val)
-					cycleCount = 1
-				}
-				cycleCount++
-			}
-			md.Annotations[DREEM_POWER_CYCLE_ANNOTATION] = strconv.Itoa(cycleCount)
-
-			if err := r.Update(ctx, md); err != nil {
-				klog.V(2).ErrorS(err, "Failed to update MachineDeployment with new cycle-count annotation", "name", machineDeploymentName)
-				return false, err
-			}
-			return true, nil
 		}
+
+		klog.V(3).Info("Waiting for node " + selectedNode_string + " to become Ready")
 		return false, nil
 	})
 	if err != nil {
-		klog.V(2).ErrorS(err, "Timed out waiting for MachineDeployment to become ready")
+		klog.V(2).ErrorS(err, "Timed out waiting for Node to become ready")
 		return err
 	}
 
 	return nil
 }
 
-func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode string, selectedMD string, scalingLabel int32) error {
+func performPowerCycleAction(ctx context.Context, username string, password string, endpoint string, action string) error {
+	// Perform a post request to the Redfish API endpoint with the provided credentials and action
+
+	klog.V(2).InfoS("Performing power cycle action through Redfish API", "endpoint", endpoint, "action", action)
+	jsonData := map[string]interface{}{}
+	switch action {
+	case "ON":
+		jsonData = map[string]interface{}{
+			"ResetType": "On",
+		}
+	case "OFF":
+		jsonData = map[string]interface{}{
+			"ResetType": "GracefulShutdown",
+		}
+	default:
+		return fmt.Errorf("Invalid power cycle action: %s", action)
+	}
+
+	jsonValue, err := json.Marshal(jsonData)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal JSON data for Redfish API request: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return fmt.Errorf("Failed to create HTTP request for Redfish API: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(username, password)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("Failed to perform HTTP request to Redfish API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("Redfish API returned non-success status code: %d", resp.StatusCode)
+	}
+
+	klog.V(2).InfoS("Power cycle action performed successfully through Redfish API", "endpoint", endpoint, "action", action)
+	return nil
+}
+
+func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode_string string, scalingLabel int32) error {
 	klog.FromContext(ctx).WithName("scale-down")
 
-	// get the MachineDeployment of the selected node and update the replicas
-	if selectedNode == "" {
-		klog.V(2).Info("No selected node provided for scaling down, cannot proceed")
-		return nil
-	}
-
-	// Find the Machine by listing all machines and matching by name
-	machineList := &clusterv1.MachineList{}
-	if err := r.List(ctx, machineList); err != nil {
-		klog.V(2).ErrorS(err, "Failed to list Machines")
+	// get the secret to access the BMC of the node and perform the power cycle action through Redfish API
+	credentialSecret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: "bmc-credentials-" + selectedNode_string, Namespace: "dreem"}, credentialSecret); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get BMC credentials secret for node "+selectedNode_string)
 		return err
 	}
 
-	var selectedNodeObj *clusterv1.Machine
-	for i, machine := range machineList.Items {
-		if machine.Name == selectedNode {
-			selectedNodeObj = &machineList.Items[i]
-			break
-		}
-	}
+	node_bmc_ip := string(credentialSecret.Data["bmc_address"])
+	endpoint := fmt.Sprintf(TEMPLATE_REDFISH_ENDPOINT, node_bmc_ip, string(credentialSecret.Data["id"]))
+	// perform the power cycle action through Redfish API
+	err := performPowerCycleAction(ctx, string(credentialSecret.Data["username"]), string(credentialSecret.Data["password"]), endpoint, "OFF")
 
-	if selectedNodeObj == nil {
-		err := fmt.Errorf("Machine %s not found", selectedNode)
-		klog.V(2).ErrorS(err, "Failed to find Machine", "name", selectedNode)
-		return err
-	}
+	klog.V(2).Info("Waiting for the node " + selectedNode_string + " to shutdown and become NotReady")
+	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
 
-	if selectedNodeObj.Annotations == nil {
-		selectedNodeObj.Annotations = make(map[string]string)
-	}
-
-	selectedNodeObj.Annotations["cluster.x-k8s.io/delete-machine"] = ""
-
-	if err := r.Update(ctx, selectedNodeObj); err != nil {
-		klog.V(2).ErrorS(err, "Failed to annotate Machine for deletion")
-		return err
-	}
-
-	// Find the MachineDeployment by listing all machinedeployments and matching by name
-	machineDeploymentList := &clusterv1.MachineDeploymentList{}
-	if err := r.List(ctx, machineDeploymentList); err != nil {
-		klog.V(2).ErrorS(err, "Failed to list MachineDeployments")
-		return err
-	}
-
-	var machineDeploymentObj *clusterv1.MachineDeployment
-	for i, md := range machineDeploymentList.Items {
-		if md.Name == selectedMD {
-			machineDeploymentObj = &machineDeploymentList.Items[i]
-			break
-		}
-	}
-
-	if machineDeploymentObj == nil {
-		err := fmt.Errorf("MachineDeployment %s not found", selectedMD)
-		klog.V(2).ErrorS(err, "Failed to find MachineDeployment", "name", selectedMD)
-		return err
-	}
-
-	if machineDeploymentObj.Spec.Replicas != nil {
-		newReplicas := *machineDeploymentObj.Spec.Replicas + scalingLabel
-		if newReplicas < 0 {
-			klog.V(2).InfoS("Scaling down to zero replicas, setting replicas to zero", "name", machineDeploymentObj.Name)
-			newReplicas = 0
-		}
-		machineDeploymentObj.Spec.Replicas = &newReplicas
-
-		if err := r.Update(ctx, machineDeploymentObj); err != nil {
-			klog.V(2).ErrorS(err, "Failed to update MachineDeployment replicas")
-			return err
+	pollInterval := 10 * time.Second
+	err = wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
+		node := &corev1.Node{}
+		if err := r.Get(ctx, client.ObjectKey{Name: selectedNode_string}, node); err != nil {
+			return false, err
 		}
 
-		klog.V(2).Info("Waiting for MachineDeployment to scale", "desiredReplicas", newReplicas)
-
-		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		defer cancel()
-
-		pollInterval := 10 * time.Second
-		err := wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
-			md := &clusterv1.MachineDeployment{}
-			if err := r.Get(ctx, client.ObjectKey{Name: selectedMD, Namespace: machineDeploymentObj.Namespace}, md); err != nil {
-				return false, err
-			}
-
-			if md.Status.ReadyReplicas == newReplicas {
-				klog.V(2).Info("MachineDeployment ", selectedMD, " successfully scaled", "replicas", md.Status.ReadyReplicas)
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status != corev1.ConditionTrue {
+				klog.V(2).Info("Node " + selectedNode_string + " is Off")
 				return true, nil
 			}
-
-			klog.V(3).Info("Waiting for MachineDeployment to reach desired replica count",
-				"name", selectedMD,
-				"current", machineDeploymentObj.Status.ReadyReplicas,
-				"desired", newReplicas,
-			)
-
-			return false, nil
-		})
-
-		if err != nil {
-			klog.V(2).ErrorS(err, "Timed out waiting for MachineDeployment to scale")
-			return err
 		}
-	} else {
-		klog.V(2).Info("No replicas specified in MachineDeployment, cannot scale down", "name", machineDeploymentObj.Name)
+
+		klog.V(3).Info("Waiting for node " + selectedNode_string + " to become NotReady")
+		return false, nil
+	})
+	if err != nil {
+		klog.V(2).ErrorS(err, "Timed out waiting for Node to shutdown")
+		return err
 	}
 
 	return nil

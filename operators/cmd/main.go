@@ -17,30 +17,23 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	klog "k8s.io/klog/v2"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
-	v1 "k8s.io/api/core/v1"
+
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -80,27 +73,10 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var externalClusterName string
-	var clusterNamespace string
 	var maxNumberOfConfigurations int
-	var leaseDuration int
-	var renewDeadline int
-	var retryPeriod int
-	var apiServerTimeout int
-	flag.StringVar(&externalClusterName, "external-cluster-name", "external-cluster",
-		"The name of the external cluster to connect to.")
-	flag.StringVar(&clusterNamespace, "cluster-namespace", "default",
-		"The namespace where the external cluster secret is located.")
+
 	flag.IntVar(&maxNumberOfConfigurations, "max-configurations", 10000,
 		"The maximum number of configurations to consider during the selection process.")
-	flag.IntVar(&leaseDuration, "lease-duration", 120,
-		"The duration in seconds that non-leader candidates will wait to force acquire leadership.")
-	flag.IntVar(&renewDeadline, "renew-deadline", 60,
-		"The duration in seconds that the acting leader will retry refreshing leadership before giving up.")
-	flag.IntVar(&retryPeriod, "retry-period", 5,
-		"The duration in seconds that LeaderElection clients should wait between tries of actions.")
-	flag.IntVar(&apiServerTimeout, "api-server-timeout", 120,
-		"The timeout in seconds for API server requests.")
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -218,7 +194,6 @@ func main() {
 	}
 
 	cfg := ctrl.GetConfigOrDie()
-	cfg.Timeout = time.Duration(apiServerTimeout) * time.Second
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -227,9 +202,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "db2bcae8.dreemk8s",
-		LeaseDuration:          ptr(time.Duration(leaseDuration) * time.Second),
-		RenewDeadline:          ptr(time.Duration(renewDeadline) * time.Second),
-		RetryPeriod:            ptr(time.Duration(retryPeriod) * time.Second),
+
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -247,12 +220,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	externalClient, externalConfig, err := getExternalClient(externalClusterName, clusterNamespace, mgr.GetConfig(), context.Background())
-	if err != nil {
-		setupLog.Error(err, "unable to create external client")
-		os.Exit(1)
-	}
-
 	if err = (&controller.ClusterConfigurationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -263,21 +230,18 @@ func main() {
 	if err = (&controller.NodeSelectingReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
-		ClusterNamespace:          clusterNamespace,
-		ExternalClient:            externalClient,
-		ExternalConfig:            externalConfig,
 		MaxNumberOfConfigurations: maxNumberOfConfigurations,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeSelecting")
 		os.Exit(1)
 	}
-	if err = (&controller.NodeHandlingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "NodeHandling")
-		os.Exit(1)
-	}
+	// if err = (&controller.NodeHandlingReconciler{
+	// 	Client: mgr.GetClient(),
+	// 	Scheme: mgr.GetScheme(),
+	// }).SetupWithManager(mgr); err != nil {
+	// 	setupLog.Error(err, "unable to create controller", "controller", "NodeHandling")
+	// 	os.Exit(1)
+	// }
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
@@ -310,53 +274,4 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-}
-
-func getExternalClient(clustername string, namespace string, cfg *rest.Config, ctx context.Context) (client.Client, *rest.Config, error) {
-	// Carica la config da file kubeconfig
-	// cfg, err := clientcmd.BuildConfigFromFlags("", "/Users/marco/.kube/capi")
-	// if err != nil {
-	// 	return nil, nil, err
-	// }
-
-	// // Crea client controller-runtime con la config esterna
-	// cl, err := client.New(cfg, client.Options{})
-	// if err != nil {
-	// 	return nil, nil, err
-	// }
-	directClient, err := client.New(cfg, client.Options{
-		Scheme: scheme,
-	})
-	secretName := clustername + "-kubeconfig"
-	secret := &v1.Secret{}
-
-	err = directClient.Get(ctx, types.NamespacedName{
-		Name:      secretName,
-		Namespace: namespace,
-	}, secret)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get kubeconfig secret %s: %w", secretName, err)
-	}
-
-	kubeconfigData, ok := secret.Data["value"]
-	if !ok {
-		return nil, nil, fmt.Errorf("secret %s does not contain 'value' field", secretName)
-	}
-
-	externalCfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create rest config from kubeconfig data: %w", err)
-	}
-
-	cl, err := client.New(externalCfg, client.Options{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create client from rest config: %w", err)
-	}
-
-	return cl, externalCfg, nil
-}
-
-// ptr is a helper function to return a pointer to a value
-func ptr[T any](v T) *T {
-	return &v
 }

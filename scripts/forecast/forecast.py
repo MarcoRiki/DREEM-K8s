@@ -15,7 +15,7 @@ ACTIVE_INSTANCE_STALENESS_MINUTES = 5
 INITIAL_BOOT_SPIKE_EXCLUSION_MINUTES = 5
 
 
-def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, external_cluster_name, rate_interval="5m"):
+def load_data_instance_cpu(prometheus_url, past_time_window, rate_interval="5m"):
     """
     This function perform the query to retrieve the data of the CPU load in order to make prediction.
     Query: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[RATE_INTERVAL])))'
@@ -23,7 +23,7 @@ def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, 
     """
     logger.info("loading CPU data to make prediction")
 
-    control_plane_ips = get_control_plane_ip(cluster_namespace, external_cluster_name)
+    control_plane_ips = get_control_plane_ip()
 
     # Costruisci la query PromQL
     if control_plane_ips and len(control_plane_ips) > 0:
@@ -33,14 +33,14 @@ def load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, 
         regex = "|".join(ips_with_port)
         cpu_query = (
             '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-            f'exported_instance!~"{regex}", exported_job="node-exporter"}}[{rate_interval}])) by (exported_instance)))'
+            f'instance!~"{regex}", job="node-exporter"}}[{rate_interval}])) by (nstance)))'
         )
     else:
         # Se non ci sono control plane IPs, query senza esclusioni
         logger.warning("No control plane IPs found, querying all instances")
         cpu_query = (
             '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-            f'exported_job="node-exporter"}}[{rate_interval}])) by (exported_instance)))'
+            f'job="node-exporter"}}[{rate_interval}])) by (instance)))'
         )
     
     logger.info(f"Constructed PromQL query: {cpu_query}")

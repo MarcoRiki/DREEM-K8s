@@ -28,10 +28,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
-	clusterapi "sigs.k8s.io/cluster-api/api/v1beta1"
+
+	//clusterapi "sigs.k8s.io/cluster-api/api/v1beta1"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -46,10 +47,7 @@ import (
 // NodeSelectingReconciler reconciles a NodeSelecting object
 type NodeSelectingReconciler struct {
 	client.Client
-	ExternalClient            client.Client
-	ExternalConfig            *rest.Config
 	MaxNumberOfConfigurations int
-	ClusterNamespace          string
 	Scheme                    *runtime.Scheme
 }
 
@@ -86,45 +84,40 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 	klog.FromContext(ctx).WithName("handle-running-phase")
 
 	selectedNode := ""
-	selectedMD := ""
 
 	if nodeSelecting.Spec.ScalingLabel < 0 {
 		klog.V(2).Info("Trying to scale down infrastructure")
-		err, MD, dNode := r.selectNodeScaleDown(ctx, nodeSelecting)
-		klog.V(2).Info("selectNodeScaleDown returned", "error", err, "selectedMD", MD, "selectedNode", dNode)
+		err, node := r.selectNodeScaleDown(ctx, nodeSelecting)
+		klog.V(2).Info("selectNodeScaleDown returned", "error", err, "selectedNode", node)
 		if err != nil {
 			return err
 		}
-		selectedMD = MD
-		selectedNode = dNode
+		selectedNode = node
 
 	} else if nodeSelecting.Spec.ScalingLabel > 0 {
 		klog.V(2).Info("Trying to scale up infrastructure")
-		err, MD := r.selectNodeScaleUp(ctx, nodeSelecting, r.Client)
+		err, node := r.selectNodeScaleUp(ctx, nodeSelecting, r.Client)
 		if err != nil {
 			return err
 		}
-		klog.V(3).Info("Selected MD:", MD, " for scale up")
-		selectedMD = MD
-		selectedNode = MD
+		selectedNode = node
 	}
 
-	if selectedMD == "" && selectedNode == "" {
+	if selectedNode == "" {
 		klog.V(2).Info("No node can be shutdown at the moment")
 		nodeSelecting.Status.Phase = v1alpha1.NS_PhaseFailed
 		nodeSelecting.Status.Message = "No node can be shutdown at the moment"
 
-	} else if selectedMD != "" && selectedNode != "" {
-		klog.V(2).Info("Node and MD selected, creating NodeHandling", "selectedNode", selectedNode, "selectedMD", selectedMD)
+	} else {
+		klog.V(2).Info("Node selected, creating NodeHandling", "selectedNode", selectedNode)
 		// if the simulation is successful, create the NodeHandling resource
-		errNH := r.CreateNodeHandling(ctx, nodeSelecting, selectedNode, selectedMD)
+		errNH := r.CreateNodeHandling(ctx, nodeSelecting, selectedNode)
 		if errNH != nil {
 			klog.V(2).ErrorS(errNH, "Failed to create NodeHandling resource in NodeSelecting", "name", nodeSelecting.Name)
 			return errNH
 		}
 
 		klog.V(2).Info("Node selected", "node", selectedNode)
-		nodeSelecting.Status.SelectedMachineDeployment = selectedMD
 		nodeSelecting.Status.SelectedNode = selectedNode
 
 		nodeSelecting.Status.Phase = v1alpha1.NS_PhaseCompleted
@@ -142,29 +135,23 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, k8sClient client.Client) (error, string) {
 	klog.FromContext(ctx).WithName("can-scale-up")
 
-	selectedMD := ""
+	selectedNode := ""
 
 	// get the list of available nodes in the cluster, apart the control plane (excldue node with label node-role.kubernetes.io/control-plane)
 	nodeList := &corev1.NodeList{}
-	if err := r.ExternalClient.List(ctx, nodeList); err != nil {
+	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
 		return err, ""
 
 	}
-	nodeListFiltered := &corev1.NodeList{}
+	nodeListFiltered := corev1.NodeList{}
 	for _, node := range nodeList.Items {
 		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; !isControlPlane {
 			nodeListFiltered.Items = append(nodeListFiltered.Items, node)
 		}
 	}
 
-	mdList := clusterapi.MachineDeploymentList{}
-	if err := r.Client.List(ctx, &mdList); err != nil {
-		klog.V(2).ErrorS(err, "failed to list MachineDeployments")
-		return err, ""
-	}
-
-	rankedNodes, err := ApplySoftConstraintsScaleUp(ctx, mdList.Items, k8sClient, *nodeSelecting)
+	rankedNodes, err := ApplySoftConstraintsScaleUp(ctx, nodeListFiltered, k8sClient, *nodeSelecting)
 
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection in scale up")
@@ -176,23 +163,22 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 		return nil, ""
 	}
 
-	selectedMD = rankedNodes[0].Name
-	klog.V(3).Info("SELECTED MD:", selectedMD)
+	selectedNode = rankedNodes[0].Name
+	klog.V(3).Info("SELECTED node:", selectedNode)
 
-	return nil, selectedMD
+	return nil, selectedNode
 }
 
-func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) (error, string, string) {
+func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) (error, string) {
 	klog.FromContext(ctx).WithName("can-scale-down")
 
 	selectedNode := ""
-	selectedMD := ""
 
 	// get the list of available nodes in the cluster, apart the control plane (excldue node with label node-role.kubernetes.io/control-plane)
 	nodeList := &corev1.NodeList{}
-	if err := r.ExternalClient.List(ctx, nodeList); err != nil {
+	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
-		return err, "", ""
+		return err, ""
 
 	}
 	nodeListFiltered := &corev1.NodeList{}
@@ -271,7 +257,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 
 	if len(validNodeToShutdown) == 0 {
 		klog.V(3).Info("No node can be shutdown after checking hard constraints")
-		return nil, selectedMD, selectedNode
+		return nil, selectedNode
 	}
 
 	// Check if there's at least one non-empty combination
@@ -284,7 +270,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	}
 	if !hasNonEmptyCombination {
 		klog.V(3).Info("All combinations are empty, no valid scheduling configuration found")
-		return nil, selectedMD, selectedNode
+		return nil, selectedNode
 	}
 
 	// select randomly one of the valid nodes to shutdown
@@ -296,23 +282,22 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	}
 
 	klog.V(2).Info("Calling ApplySoftConstraints", "numAssignments", len(total_valid[index.Int64()]), "numNodes", len(validNodeToShutdown))
-	rankedNodes, err := ApplySoftConstraints(total_valid[index.Int64()], validNodeToShutdown, ctx, r.ExternalClient, r.Client, *nodeSelecting)
+	rankedNodes, err := ApplySoftConstraints(total_valid[index.Int64()], validNodeToShutdown, ctx, r.Client, *nodeSelecting)
 	klog.V(2).Info("ApplySoftConstraints returned", "hasError", err != nil, "numRankedNodes", len(rankedNodes))
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection")
-		return err, "", ""
+		return err, ""
 	}
 
 	if len(rankedNodes) == 0 {
 		klog.V(2).Info("No nodes available after applying soft constraints")
-		return nil, selectedMD, selectedNode
+		return nil, selectedNode
 	}
 
 	selectedNode = rankedNodes[0].Name
-	selectedMD = getMDfromNode(selectedNode, r.ClusterNamespace, r.Client, ctx)
 
-	klog.V(2).Info("Scale down selection completed", "selectedNode", selectedNode, "selectedMD", selectedMD)
-	return nil, selectedMD, selectedNode
+	klog.V(2).Info("Scale down selection completed", "selectedNode", selectedNode)
+	return nil, selectedNode
 }
 
 // For more details, check Reconcile and its Result here:
@@ -381,7 +366,7 @@ func (r *NodeSelectingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *NodeSelectingReconciler) CreateNodeHandling(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, selectedNode string, selectedMD string) error {
+func (r *NodeSelectingReconciler) CreateNodeHandling(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, selectedNode string) error {
 	klog.FromContext(ctx).WithName("create-node-handling")
 
 	crdName := "node-handling-" + nodeSelecting.Spec.ClusterConfigurationName
@@ -401,11 +386,10 @@ func (r *NodeSelectingReconciler) CreateNodeHandling(ctx context.Context, nodeSe
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Spec: clusterv1alpha1.NodeHandlingSpec{
-			ClusterConfigurationName:  nodeSelecting.Spec.ClusterConfigurationName,
-			NodeSelectingName:         nodeSelecting.Name,
-			SelectedNode:              selectedNode,
-			SelectedMachineDeployment: selectedMD,
-			ScalingLabel:              nodeSelecting.Spec.ScalingLabel,
+			ClusterConfigurationName: nodeSelecting.Spec.ClusterConfigurationName,
+			NodeSelectingName:        nodeSelecting.Name,
+			SelectedNode:             selectedNode,
+			ScalingLabel:             nodeSelecting.Spec.ScalingLabel,
 		},
 	}
 
@@ -424,7 +408,7 @@ func (r *NodeSelectingReconciler) CreateNodeHandling(ctx context.Context, nodeSe
 // it exccludes pods like deamonset, mirrored/static pods, etc.
 func (r *NodeSelectingReconciler) getMigratablePodsOnNode(ctx context.Context, nodeName string) ([]corev1.Pod, error) {
 	var allPods corev1.PodList
-	err := r.ExternalClient.List(ctx, &allPods, client.MatchingFields{"spec.nodeName": nodeName})
+	err := r.Client.List(ctx, &allPods, client.MatchingFields{"spec.nodeName": nodeName})
 	if err != nil {
 		return nil, err
 	}

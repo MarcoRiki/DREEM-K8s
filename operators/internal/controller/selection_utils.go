@@ -16,7 +16,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
-	clusterapi "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -484,9 +483,9 @@ type TOPSISCriteria struct {
 }
 
 type TOPSISCriteriaScaleUp struct {
-	MachineDeployment clusterapi.MachineDeployment
-	PowerCycle        int     // cost, to minimize
-	EnergyProfile     float64 // cost, to minimize in scale up (lower values represent higher efficiency, so better nodes)
+	Node          corev1.Node
+	PowerCycle    int     // cost, to minimize
+	EnergyProfile float64 // cost, to minimize in scale up (lower values represent higher efficiency, so better nodes)
 }
 
 type RankedNode struct {
@@ -496,7 +495,7 @@ type RankedNode struct {
 
 type RankedMachineDeployment struct {
 	RelativeCloseness float64
-	MachineDeployment clusterapi.MachineDeployment
+	Node              corev1.Node
 }
 
 type AHPweights struct {
@@ -523,45 +522,45 @@ type ahpProfileCM struct {
 	NumberOfRunningPods      string `yaml:"NumberOfRunningPods"`
 }
 
-func ApplySoftConstraintsScaleUp(ctx context.Context, md []clusterapi.MachineDeployment, k8sClient client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]clusterapi.MachineDeployment, error) {
+func ApplySoftConstraintsScaleUp(ctx context.Context, nodes corev1.NodeList, k8sClient client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, error) {
 	klog.FromContext(ctx).WithName("Apply-TOPSIS-scale-up")
 
 	var criteriaList []TOPSISCriteriaScaleUp
 
-	for _, d := range md {
-		if d.Spec.Replicas == nil || *d.Spec.Replicas == 0 { // eligible for scale up
+	for _, d := range nodes.Items {
+		if d.Status.Phase != corev1.NodeRunning {
 
 			// get power cycle count
 			powerCycleStr, ok := d.Annotations[DREEM_POWER_CYCLE_ANNOTATION]
 			if !ok {
-				klog.V(2).Info("Power cycle annotation not found for MachineDeployment", "md", d.Name)
+				klog.V(2).Info("Power cycle annotation not found for Node", "node", d.Name)
 				continue
 			}
 			powerCycle, err := strconv.Atoi(powerCycleStr)
 			if err != nil {
-				klog.V(2).ErrorS(err, "Failed to convert power cycle annotation to int for MachineDeployment", "md", d.Name)
+				klog.V(2).ErrorS(err, "Failed to convert power cycle annotation to int for Node", "node", d.Name)
 				continue
 			}
 
 			// get the energy profile for each node
 			energyProfileStr, ok := d.Annotations[DREEM_ENERGY_EFFICIENCY_ANNOTATION]
 			if !ok {
-				klog.V(2).Info("Energy efficiency annotation not found for MachineDeployment", "md", d.Name)
+				klog.V(2).Info("Energy efficiency annotation not found for Node", "node", d.Name)
 				continue
 			}
 			energyProfile, err := strconv.ParseFloat(energyProfileStr, 64)
 			if err != nil {
-				klog.V(2).ErrorS(err, "Failed to convert energy efficiency annotation to float for MachineDeployment", "md", d.Name)
+				klog.V(2).ErrorS(err, "Failed to convert energy efficiency annotation to float for Node", "node", d.Name)
 				continue
 			}
 			criteria := TOPSISCriteriaScaleUp{
-				MachineDeployment: d,
-				PowerCycle:        powerCycle,
-				EnergyProfile:     energyProfile,
+				Node:          d,
+				PowerCycle:    powerCycle,
+				EnergyProfile: energyProfile,
 			}
 			criteriaList = append(criteriaList, criteria)
 
-		} else { // if there is a replica, the server is already up
+		} else { // if the node is already running, we skip it for scale up evaluation
 			continue
 		}
 	}
@@ -569,7 +568,7 @@ func ApplySoftConstraintsScaleUp(ctx context.Context, md []clusterapi.MachineDep
 	// Check if we have any valid criteria
 	if len(criteriaList) == 0 {
 		klog.V(2).Info("No valid criteria collected for TOPSIS scale-up evaluation, all MachineDeployments had errors or are already running")
-		return []clusterapi.MachineDeployment{}, nil
+		return []corev1.Node{}, nil
 	}
 
 	// load weights
@@ -589,7 +588,7 @@ func ApplySoftConstraintsScaleUp(ctx context.Context, md []clusterapi.MachineDep
 	return rankedNodes, nil
 }
 
-func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx context.Context, managedClusterClient client.Client, managementClusterClient client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, error) {
+func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx context.Context, client client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, error) {
 	klog.FromContext(ctx).WithName("Apply-TOPSIS-scale-down")
 	klog.V(2).Info("Applying soft constraints with TOPSIS")
 	// Fill the structure with criteria values
@@ -597,21 +596,21 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 	for _, node := range nodes {
 
 		// get number of running pods
-		numPods, err := GetNumberOfRunningPods(node, ctx, managedClusterClient)
+		numPods, err := GetNumberOfRunningPods(node, ctx, client)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to get number of running pods on node", "node", node.Name)
 			continue
 		}
 
 		// get power cycle count
-		powerCycle, err := GetPowerCycle(node, ctx, managementClusterClient)
+		powerCycle, err := GetPowerCycle(node, ctx, client)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to get power cycle count for node", "node", node.Name)
 			continue
 		}
 
 		// get the energy profile for each node
-		energyProfile, err := GetEnergyProfile(node, ctx, managementClusterClient)
+		energyProfile, err := GetEnergyProfile(node, ctx, client)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to get energy profile for node", "node", node.Name)
 			continue
@@ -621,13 +620,13 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 		preferredNodeAffinity := GetPreferredNodeAffinity(node, validScheduling)
 
 		// compute preferred inter-pod affinity
-		preferredInterPodAffinity, err := GetPreferredInterPodAffinity(node, validScheduling, managedClusterClient, ctx)
+		preferredInterPodAffinity, err := GetPreferredInterPodAffinity(node, validScheduling, client, ctx)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to get preferred inter-pod affinity for node", "node", node.Name)
 			continue
 		}
 
-		preferredInterPodAntiAffinity, err := GetPreferredInterPodAntiAffinity(node, validScheduling, managedClusterClient, ctx)
+		preferredInterPodAntiAffinity, err := GetPreferredInterPodAntiAffinity(node, validScheduling, client, ctx)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to get preferred inter-pod anti-affinity for node", "node", node.Name)
 			continue
@@ -654,13 +653,13 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 	}
 
 	// load weights
-	weights, err := LoadAHPweights(managementClusterClient, ctx)
+	weights, err := LoadAHPweights(client, ctx)
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to load AHP weights")
 		return nil, err
 	}
 	// apply TOPSIS
-	rankedNodes, err := ApplyTOPSIS(criteriaList, weights, nodeSelecting, managementClusterClient, ctx)
+	rankedNodes, err := ApplyTOPSIS(criteriaList, weights, nodeSelecting, client, ctx)
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply TOPSIS")
 		return nil, err
@@ -675,61 +674,24 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 	return nodes, nil
 }
 
-func GetPowerCycle(nodeManagedCluster corev1.Node, ctx context.Context, managementClient client.Client) (int, error) {
-	// retrieve the power cycle count from MachineDeployment annotations
-
-	// retrieve the machine whose NodeName matches the node in the managed cluster
-	machineClusterAPI := &clusterapi.Machine{}
-	machineList := &clusterapi.MachineList{}
-
-	err := managementClient.List(ctx, machineList)
-	if err != nil {
-		return 0, err
-	}
-
-	if len(machineList.Items) == 0 {
-		return 0, fmt.Errorf("no Machine found for Node %s", nodeManagedCluster.Name)
-	}
-
-	// find the machine with the matching NodeName
-	for i, machine := range machineList.Items {
-		if *machine.Spec.ProviderID == nodeManagedCluster.Spec.ProviderID {
-			machineClusterAPI = &machineList.Items[i]
-			break
-		}
-	}
-
-	if machineClusterAPI == nil {
-		return 0, fmt.Errorf(
-			"no Machine found matching Node %s",
-			nodeManagedCluster.Name,
-		)
-	}
-
-	machineDeploymentName, ok := machineClusterAPI.Labels[CAPI_MACHINE_DEPLOYMENT_LABEL]
-	if !ok {
-		return 0, fmt.Errorf("machine %s does not have MachineDeployment label", machineClusterAPI.Name)
-	}
-
-	machineDeployment := &clusterapi.MachineDeployment{}
-	err = managementClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: machineClusterAPI.Namespace}, machineDeployment)
-	if err != nil {
+func GetPowerCycle(node corev1.Node, ctx context.Context, k8sClient client.Client) (int, error) {
+	fetchedNode := &corev1.Node{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: node.Name}, fetchedNode); err != nil {
 		return 0, err
 	}
 
 	// add annotation only if not present
-	if _, ok := machineDeployment.Annotations[DREEM_POWER_CYCLE_ANNOTATION]; !ok {
-		if machineDeployment.Annotations == nil {
-			machineDeployment.Annotations = make(map[string]string)
+	if _, ok := fetchedNode.Annotations[DREEM_POWER_CYCLE_ANNOTATION]; !ok {
+		if fetchedNode.Annotations == nil {
+			fetchedNode.Annotations = make(map[string]string)
 		}
-		machineDeployment.Annotations[DREEM_POWER_CYCLE_ANNOTATION] = "0"
-		err = managementClient.Update(ctx, machineDeployment)
-		if err != nil {
+		fetchedNode.Annotations[DREEM_POWER_CYCLE_ANNOTATION] = "0"
+		if err := k8sClient.Update(ctx, fetchedNode); err != nil {
 			return 0, err
 		}
 	}
 
-	powerCycleStr, ok := machineDeployment.Annotations[DREEM_POWER_CYCLE_ANNOTATION]
+	powerCycleStr, ok := fetchedNode.Annotations[DREEM_POWER_CYCLE_ANNOTATION]
 	if !ok {
 		return 0, nil
 	}
@@ -743,48 +705,17 @@ func GetPowerCycle(nodeManagedCluster corev1.Node, ctx context.Context, manageme
 
 }
 
-func GetEnergyProfile(nodeManagedCluster corev1.Node, ctx context.Context, managementClient client.Client) (float64, error) {
-	// retrieve the energy efficiency from MachineDeployment annotation
-	machineClusterAPI := &clusterapi.Machine{}
-	machineList := &clusterapi.MachineList{}
-
-	err := managementClient.List(ctx, machineList)
+func GetEnergyProfile(nodeManagedCluster corev1.Node, ctx context.Context, k8sClient client.Client) (float64, error) {
+	// retrieve the energy efficiency from the Node annotation
+	node := &corev1.Node{}
+	err := k8sClient.Get(ctx, client.ObjectKey{Name: nodeManagedCluster.Name}, node)
 	if err != nil {
 		return 0, err
 	}
 
-	if len(machineList.Items) == 0 {
-		return 0, fmt.Errorf("no Machine found for Node %s", nodeManagedCluster.Name)
-	}
-
-	// find the machine with the matching NodeName
-	for i, machine := range machineList.Items {
-		if *machine.Spec.ProviderID == nodeManagedCluster.Spec.ProviderID {
-			machineClusterAPI = &machineList.Items[i]
-			break
-		}
-	}
-
-	if machineClusterAPI == nil {
-		return 0, fmt.Errorf(
-			"no Machine found matching Node %s",
-			nodeManagedCluster.Name,
-		)
-	}
-	machineDeploymentName, ok := machineClusterAPI.Labels[CAPI_MACHINE_DEPLOYMENT_LABEL]
+	energyProfileStr, ok := node.Annotations[DREEM_ENERGY_EFFICIENCY_ANNOTATION]
 	if !ok {
-		return 0, nil
-	}
-	machineDeployment := &clusterapi.MachineDeployment{}
-	err = managementClient.Get(ctx, client.ObjectKey{Name: machineDeploymentName, Namespace: machineClusterAPI.Namespace}, machineDeployment)
-	if err != nil {
-		return 0, err
-	}
-
-	// return error if annotation not present
-	energyProfileStr, ok := machineDeployment.Annotations[DREEM_ENERGY_EFFICIENCY_ANNOTATION]
-	if !ok {
-		return 0, fmt.Errorf("energy efficiency annotation not found for MachineDeployment %s", machineDeploymentName)
+		return 0, fmt.Errorf("energy efficiency annotation not found for Node %s", nodeManagedCluster.Name)
 	}
 
 	energyProfile, err := strconv.ParseFloat(energyProfileStr, 64)
@@ -1106,13 +1037,13 @@ func ApplyTOPSIS(criteriaList []TOPSISCriteria, weights AHPweights, nodeSelectin
 }
 
 // APPLY TOPSIS METHOD FOR SCALE UP (simplified model)
-func ApplyTOPSISScaleUp(criteriaList []TOPSISCriteriaScaleUp, weights AHPweightsScaleUp, nodeSelecting clusterv1alpha1.NodeSelecting, managementClusterClient client.Client, ctx context.Context) ([]clusterapi.MachineDeployment, error) {
+func ApplyTOPSISScaleUp(criteriaList []TOPSISCriteriaScaleUp, weights AHPweightsScaleUp, nodeSelecting clusterv1alpha1.NodeSelecting, managementClusterClient client.Client, ctx context.Context) ([]corev1.Node, error) {
 	// Implementation for scale up TOPSIS application
 
 	// Check if criteriaList is empty
 	if len(criteriaList) == 0 {
-		klog.V(2).Info("No machine deployments available for TOPSIS evaluation")
-		return []clusterapi.MachineDeployment{}, nil
+		klog.V(2).Info("No node available for TOPSIS evaluation")
+		return []corev1.Node{}, nil
 	}
 
 	evalMatrix := MakeEvaluationMatrixScaleUp(criteriaList)
@@ -1131,24 +1062,24 @@ func ApplyTOPSISScaleUp(criteriaList []TOPSISCriteriaScaleUp, weights AHPweights
 	// saveMatrixToJSON(name+".json", weightedMatrix, nodes, nodeSelecting, managementClusterClient, ctx)
 
 	// Associate relative closeness to MachineDeployment
-	rankedMDs := make([]RankedMachineDeployment, len(criteriaList))
+	rankedNodes := make([]RankedMachineDeployment, len(criteriaList))
 	for i, crit := range criteriaList {
-		rankedMDs[i] = RankedMachineDeployment{
+		rankedNodes[i] = RankedMachineDeployment{
 			RelativeCloseness: relativeCloseness[i],
-			MachineDeployment: crit.MachineDeployment,
+			Node:              crit.Node,
 		}
 	}
 
 	// Rank the alternatives based on their relative closeness: the higher, the better
-	sortedRankedMDs := SortMachineDeploymentsByCloseness(rankedMDs)
+	sortedRankedNodes := SortMachineDeploymentsByCloseness(rankedNodes)
 
-	// Extract ordered MachineDeployment list
-	orderedMDs := make([]clusterapi.MachineDeployment, 0, len(sortedRankedMDs))
-	for _, rankedMD := range sortedRankedMDs {
-		orderedMDs = append(orderedMDs, rankedMD.MachineDeployment)
+	// Extract ordered Node list
+	orderedNodes := make([]corev1.Node, 0, len(sortedRankedNodes))
+	for _, rankedNode := range sortedRankedNodes {
+		orderedNodes = append(orderedNodes, rankedNode.Node)
 	}
 
-	return orderedMDs, nil
+	return orderedNodes, nil
 
 }
 
@@ -1406,9 +1337,9 @@ func SortNodesByCloseness(rankedNodes []RankedNode) []RankedNode {
 	return sorted
 }
 
-func SortMachineDeploymentsByCloseness(rankedMDs []RankedMachineDeployment) []RankedMachineDeployment {
-	sorted := make([]RankedMachineDeployment, len(rankedMDs))
-	copy(sorted, rankedMDs)
+func SortMachineDeploymentsByCloseness(rankedNodes []RankedMachineDeployment) []RankedMachineDeployment {
+	sorted := make([]RankedMachineDeployment, len(rankedNodes))
+	copy(sorted, rankedNodes)
 
 	// simple bubble sort
 	for i := 0; i < len(sorted)-1; i++ {
@@ -1420,12 +1351,4 @@ func SortMachineDeploymentsByCloseness(rankedMDs []RankedMachineDeployment) []Ra
 	}
 
 	return sorted
-}
-
-func getMDfromNode(selectedNode string, namespace string, k8sclient client.Client, ctx context.Context) string {
-	// get the machine (clusterapi res) with the name of the node
-	associatedMachine := &clusterapi.Machine{}
-	k8sclient.Get(ctx, client.ObjectKey{Name: selectedNode, Namespace: namespace}, associatedMachine)
-	selectedMD := associatedMachine.Labels[CAPI_MACHINE_DEPLOYMENT_LABEL]
-	return selectedMD
 }

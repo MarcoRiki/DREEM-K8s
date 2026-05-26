@@ -41,9 +41,6 @@ type NodeSelectingSpec struct {
 // NodeSelectingStatus defines the observed state of NodeSelecting.
 type NodeSelectingStatus struct {
 
-	// MachineDeployment selected for the scaling process
-	SelectedMachineDeployment string `json:"selectedMachineDeployment"`
-
 	// Worker selected for the scaling process
 	SelectedNode string `json:"selectedNode"`
 
@@ -62,7 +59,7 @@ type NodeSelectingStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="ClusterConf",type=string,JSONPath=`.spec.clusterConfigurationName`
 // +kubebuilder:printcolumn:name="ScalingLabel",type=integer,JSONPath=`.spec.scalingLabel`
-// +kubebuilder:printcolumn:name="SelectedMD",type=string,JSONPath=`.status.selectedMachineDeployment`
+// +kubebuilder:printcolumn:name="SelectedNode",type=string,JSONPath=`.status.selectedNode`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NodeSelecting is the Schema for the nodeselectings API.

@@ -24,8 +24,8 @@ spec:
     - jsonPath: .spec.scalingLabel
       name: Scaling Label
       type: integer
-    - jsonPath: .spec.selectedMachineDeployment
-      name: Seleted MD
+    - jsonPath: .spec.selectedNode
+      name: Selected Node
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -66,9 +66,6 @@ spec:
                   scale up, or negative, scale down)
                 format: int32
                 type: integer
-              selectedMachineDeployment:
-                description: MachineDeployment selected for the scaling process
-                type: string
               selectedNode:
                 description: Worker selected for the scaling process
                 type: string
@@ -76,7 +73,6 @@ spec:
             - clusterConfigurationName
             - nodeSelectingName
             - scalingLabel
-            - selectedMachineDeployment
             - selectedNode
             type: object
           status:

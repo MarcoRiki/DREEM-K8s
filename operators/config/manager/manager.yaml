@@ -63,8 +63,6 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-          - --external-cluster-name=dreem-mmiracapillo-cluster
-          - --cluster-namespace=default
           - --max-configurations=10000
         image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.9
         imagePullPolicy: IfNotPresent

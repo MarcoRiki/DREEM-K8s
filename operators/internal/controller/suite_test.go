@@ -102,7 +102,6 @@ var _ = BeforeSuite(func() {
 	err = (&controller.NodeSelectingReconciler{
 		Client:                    k8sClient,
 		Scheme:                    scheme.Scheme,
-		ExternalConfig:            cfg,
 		MaxNumberOfConfigurations: 10000,
 	}).SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())

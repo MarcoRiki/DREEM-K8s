@@ -40,9 +40,6 @@ type NodeHandlingSpec struct {
 	// Worker selected for the scaling process
 	SelectedNode string `json:"selectedNode"`
 
-	// MachineDeployment selected for the scaling process
-	SelectedMachineDeployment string `json:"selectedMachineDeployment"`
-
 	// Number of node to add to the cluster (it can be positive, scale up, or negative, scale down)
 	ScalingLabel int32 `json:"scalingLabel"`
 }
@@ -62,7 +59,7 @@ type NodeHandlingStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="ClusterConf",type=string,JSONPath=`.spec.clusterConfigurationName`
 // +kubebuilder:printcolumn:name="Scaling Label",type=integer,JSONPath=`.spec.scalingLabel`
-// +kubebuilder:printcolumn:name="Seleted MD",type=string,JSONPath=`.spec.selectedMachineDeployment`
+// +kubebuilder:printcolumn:name="Selected Node",type=string,JSONPath=`.spec.selectedNode`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NodeHandling is the Schema for the nodehandlings API.

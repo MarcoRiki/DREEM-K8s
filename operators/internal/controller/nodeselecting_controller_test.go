@@ -975,8 +975,15 @@ var _ = Describe("NodeSelecting Controller", func() {
 
 			By("creating nodes in k8s cluster")
 			node1 := nodeSmall.DeepCopy()
+			node1.Annotations = map[string]string{
+				controller.DREEM_POWER_CYCLE_ANNOTATION: "7",
+			}
 			node3 := nodeAffinity_B.DeepCopy()
+			node3.Annotations = map[string]string{}
 			node2 := nodeAffinity_A.DeepCopy()
+			node2.Annotations = map[string]string{
+				controller.DREEM_POWER_CYCLE_ANNOTATION: "10",
+			}
 
 			k8sClient.Create(ctx, node1)
 			k8sClient.Create(ctx, node3)
@@ -1034,9 +1041,9 @@ var _ = Describe("NodeSelecting Controller", func() {
 
 			By("testing the annotation is created with value 0")
 			Eventually(func() string {
-				updatedMachineDeployment3 := &clusterapi.MachineDeployment{}
-				_ = k8sClient.Get(ctx, client.ObjectKey{Name: machineDeployment3.Name, Namespace: machineDeployment3.Namespace}, updatedMachineDeployment3)
-				return updatedMachineDeployment3.Annotations[controller.DREEM_POWER_CYCLE_ANNOTATION]
+				updatedNode3 := &corev1.Node{}
+				_ = k8sClient.Get(ctx, client.ObjectKey{Name: node3.Name}, updatedNode3)
+				return updatedNode3.Annotations[controller.DREEM_POWER_CYCLE_ANNOTATION]
 			}, "10s", "250ms").Should(Equal("0"))
 
 		})

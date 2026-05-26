@@ -35,35 +35,16 @@ def load_configuration():
 
 
 
-def get_control_plane_ip(cluster_namespace, external_cluster_name):
+def get_control_plane_ip():
     """
-    Get control plane IP from the external cluster's Node resources
-    Args:
-        cluster_namespace: namespace where the CAPI cluster is defined
-        external_cluster_name: name of the CAPI cluster
+    Get control plane IP from  Node resources
+    
     """
     v1 = client.CoreV1Api()
-    
+        
     try:
-        # Retrieve the kubeconfig secret
-        secret_name = f"{external_cluster_name}-kubeconfig"
-        secret = v1.read_namespaced_secret(name=secret_name, namespace=cluster_namespace)
-        
-        # Decode the kubeconfig from the secret
-        kubeconfig_data = base64.b64decode(secret.data['value']).decode('utf-8')
-        
-        # Write kubeconfig to a temporary file
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml') as temp_kubeconfig:
-            temp_kubeconfig.write(kubeconfig_data)
-            temp_kubeconfig_path = temp_kubeconfig.name
-        
-        try:
-            # Load the external cluster configuration
-            external_api_client = config.new_client_from_config(config_file=temp_kubeconfig_path)
-            external_v1 = client.CoreV1Api(external_api_client)
-            
-            # Get Node resources from the external cluster
-            nodes = external_v1.list_node()
+            # Get Node resources 
+            nodes = v1.list_node()
             
             cp = []
             for node in nodes.items:
@@ -83,16 +64,11 @@ def get_control_plane_ip(cluster_namespace, external_cluster_name):
                             logger.info(f"Found control plane node {node.metadata.name} with IP: {address.address}")
             
             if len(cp) == 0:
-                logger.warning(f"No control plane nodes found in cluster {external_cluster_name}")
+                logger.warning(f"No control plane nodes found in cluster")
                 return None
             
             return cp
             
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_kubeconfig_path):
-                os.unlink(temp_kubeconfig_path)
-                
     except Exception as e:
         logger.error(f"Error getting control plane IP: {e}")
         return None

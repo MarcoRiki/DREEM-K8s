@@ -19,7 +19,7 @@ spec:
       containers:
       - name: forecast
         image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/forecast:0.0.27
-        args: ["--start-after", "5", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090", "--cluster-namespace", "metal3", "--external-cluster-name", "test1",  "--rate-interval", "10m"]  
+        args: ["--start-after", "5", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",  "--rate-interval", "10m"]  
 
 ---
 apiVersion: v1

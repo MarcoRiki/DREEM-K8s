@@ -7,6 +7,7 @@ import (
 	"os"
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -18,23 +19,25 @@ var (
 	DREEM_POWER_CYCLE_ANNOTATION        = "dreemk8s.io/power-cycle-count"
 	DREEM_ENERGY_EFFICIENCY_ANNOTATION  = "dreemk8s.io/consumption-profile"
 	CAPI_MACHINE_DEPLOYMENT_LABEL       = "cluster.x-k8s.io/deployment-name"
+	TEMPLATE_REDFISH_ENDPOINT           = "https://%s/redfish/v1/Systems/%s/Actions/ComputerSystem.Reset"
 )
 
-// number of worker nodes in the ClusterAPI managed cluster
+// number of worker nodes in the cluster, excluding control plane nodes (nodes with label node-role.kubernetes.io/control-plane)
 func getNumberOfWorkerNodes(ctx context.Context, k8sClient client.Client) (int32, error) {
 
-	machineDeploymentList := &clusterv1.MachineDeploymentList{}
-	if err := k8sClient.List(ctx, machineDeploymentList); err != nil {
+	nodes := &corev1.NodeList{}
+	if err := k8sClient.List(ctx, nodes); err != nil {
 		return 0, err
 	}
 
 	var numberOfWorkerNodes int32
-	for _, md := range machineDeploymentList.Items {
-
-		//numberOfWorkerNodes += md.Status.ReadyReplicas
-		numberOfWorkerNodes += md.Status.ReadyReplicas
+	for _, node := range nodes.Items {
+		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; !isControlPlane {
+			numberOfWorkerNodes++
+		}
 	}
 	return numberOfWorkerNodes, nil
+
 }
 
 // useful for logs during tests

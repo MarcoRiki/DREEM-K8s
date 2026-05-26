@@ -24,8 +24,8 @@ spec:
     - jsonPath: .spec.scalingLabel
       name: ScalingLabel
       type: integer
-    - jsonPath: .status.selectedMachineDeployment
-      name: SelectedMD
+    - jsonPath: .status.selectedNode
+      name: SelectedNode
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -79,9 +79,6 @@ spec:
               phase:
                 description: Execution phase of the resource
                 type: string
-              selectedMachineDeployment:
-                description: MachineDeployment selected for the scaling process
-                type: string
               selectedNode:
                 description: Worker selected for the scaling process
                 type: string
@@ -89,7 +86,6 @@ spec:
             - message
             - nodesRanking
             - phase
-            - selectedMachineDeployment
             - selectedNode
             type: object
         type: object

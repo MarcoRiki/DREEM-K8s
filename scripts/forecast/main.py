@@ -42,7 +42,7 @@ class LSTMForecast(nn.Module):
 
 logger = logging.getLogger(__name__)
 
-def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, cluster_namespace, external_cluster_name, rate_interval="5m"):
+def forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, rate_interval="5m"):
     """
     The function returns the number of nodes that must be turned on (positive number) or off (negative number)
     """
@@ -52,7 +52,7 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
     if model == "naive":
 
         logger.info("naive CPU prediction is started")
-        df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window, cluster_namespace, external_cluster_name)
+        df_cpu, err = load_data_instance_cpu(prometheus_url, past_time_window, rate_interval)
         if err:
             logger.error("error in loading data for forecast")
             return 0
@@ -72,7 +72,7 @@ def forecast(prometheus_url, past_time_window, future_time_window, min_threshold
     elif model == "LSTM":
 
         logger.info("LSTM CPU prediction is started")
-        df_cpu, err = load_data_instance_cpu(prometheus_url, INPUT_TIME, cluster_namespace, external_cluster_name, rate_interval)
+        df_cpu, err = load_data_instance_cpu(prometheus_url, INPUT_TIME,  rate_interval)
         if err:
             logger.error("error in loading data for forecast")
             return 0
@@ -281,10 +281,6 @@ def main():
                         help='Minutes to wait before starting the first forecast (default: 0)')
     parser.add_argument('--prometheus-url', type=str, default="http://localhost:9090", 
                         help='URL of the Prometheus service')
-    parser.add_argument('--cluster-namespace', type=str, required=True,
-                        help='Namespace where the ClusterAPI cluster is defined')
-    parser.add_argument('--external-cluster-name', type=str, required=True,
-                        help='Name of the external cluster created by CAPI')
     parser.add_argument('--rate-interval', type=str, default="5m",
                         help='Interval for Prometheus rate function (default: 5m)')
     args = parser.parse_args()
@@ -314,7 +310,7 @@ def main():
             continue
         
         active_worker = get_active_worker()
-        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, args.cluster_namespace, args.external_cluster_name, args.rate_interval)
+        scaling_label = forecast(prometheus_url, past_time_window, future_time_window, min_threshold, max_threshold, model, mean_time_to_boot, args.rate_interval)
         min_nodes, max_nodes = read_cluster_configuration_cm()
         
         # Stabilization logic: only create ClusterConfiguration if scaling_label is stable (same value for 2 consecutive cycles)
