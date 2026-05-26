@@ -235,13 +235,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeSelecting")
 		os.Exit(1)
 	}
-	// if err = (&controller.NodeHandlingReconciler{
-	// 	Client: mgr.GetClient(),
-	// 	Scheme: mgr.GetScheme(),
-	// }).SetupWithManager(mgr); err != nil {
-	// 	setupLog.Error(err, "unable to create controller", "controller", "NodeHandling")
-	// 	os.Exit(1)
-	// }
+	if err = (&controller.NodeHandlingReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "NodeHandling")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
