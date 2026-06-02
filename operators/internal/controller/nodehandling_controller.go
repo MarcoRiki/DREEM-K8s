@@ -48,6 +48,8 @@ type NodeHandlingReconciler struct {
 // +kubebuilder:rbac:groups=cluster.dreemk8s,resources=nodehandlings/finalizers,verbs=update
 
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update
 
 func (r *NodeHandlingReconciler) handleInitialPhase(ctx context.Context, nodeHandling *clusterv1alpha1.NodeHandling) error {
 	klog.FromContext(ctx).WithName("handle-initial-phase")
@@ -211,6 +213,28 @@ func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32
 	})
 	if err != nil {
 		klog.V(2).ErrorS(err, "Timed out waiting for Node to become ready")
+		return err
+	}
+
+	// update the DREEM_POWER_CYCLE_ANNOTATION annotation of the node to keep track of how many times the node has been power cycled
+	node := &corev1.Node{}
+	if err := r.Get(ctx, client.ObjectKey{Name: selectedNode_string}, node); err != nil {
+		klog.V(2).ErrorS(err, "Failed to get node "+selectedNode_string+" to update power cycle annotation")
+		return err
+	}
+
+	powerCycleCount := int32(0)
+	if val, ok := node.Annotations[DREEM_POWER_CYCLE_ANNOTATION]; ok {
+		fmt.Sscanf(val, "%d", &powerCycleCount)
+	}
+	powerCycleCount++
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	node.Annotations[DREEM_POWER_CYCLE_ANNOTATION] = fmt.Sprintf("%d", powerCycleCount)
+
+	if err := r.Update(ctx, node); err != nil {
+		klog.V(2).ErrorS(err, "Failed to update node "+selectedNode_string+" with new power cycle count annotation")
 		return err
 	}
 

@@ -8,13 +8,21 @@ rules:
   - ""
   resources:
   - configmaps
-  - nodes
   - pods
   - secrets
   - services
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - update
   - watch
 - apiGroups:
   - cluster.dreemk8s

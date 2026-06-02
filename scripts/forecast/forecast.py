@@ -33,7 +33,7 @@ def load_data_instance_cpu(prometheus_url, past_time_window, rate_interval="5m")
         regex = "|".join(ips_with_port)
         cpu_query = (
             '100*(1 - (avg(rate(node_cpu_seconds_total{mode="idle", '
-            f'instance!~"{regex}", job="node-exporter"}}[{rate_interval}])) by (nstance)))'
+            f'instance!~"{regex}", job="node-exporter"}}[{rate_interval}])) by (instance)))'
         )
     else:
         # Se non ci sono control plane IPs, query senza esclusioni
@@ -71,7 +71,7 @@ def load_data_instance_cpu(prometheus_url, past_time_window, rate_interval="5m")
             continue
         last_timestamp = datetime.datetime.fromtimestamp(float(metric_values[-1][0]))
         if (end_time - last_timestamp) > staleness_delta:
-            instance = metric.get('metric', {}).get('exported_instance', 'unknown')
+            instance = metric.get('metric', {}).get('instance', 'unknown')
             logger.info(
                 f"Skipping inactive instance {instance}: last sample at {last_timestamp} "
                 f"(older than {ACTIVE_INSTANCE_STALENESS_MINUTES} minutes)"
@@ -84,7 +84,7 @@ def load_data_instance_cpu(prometheus_url, past_time_window, rate_interval="5m")
         return pd.DataFrame(), False
 
     for metric in active_results:
-        instance = metric['metric']['exported_instance']
+        instance = metric['metric']['instance']
         for timestamp, value in metric['values']:
             data.append({
                 'ds': pd.to_datetime(timestamp, unit='s'),

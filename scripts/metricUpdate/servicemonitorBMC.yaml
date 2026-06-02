@@ -46,37 +46,24 @@ spec:
     path: /metrics
     params:
       target:
-      - "192.168.24.81"
+      - "192.168.24.85"
     relabelings:
     - sourceLabels: []
       targetLabel: bmc_target
-      replacement: "192.168.24.81"
+      replacement: "192.168.24.85"
     - sourceLabels: []
       targetLabel: node_name
-      replacement: "worker-node-1"
+      replacement: "restart-srv05"
   - port: metrics
     interval: 30s
     path: /metrics
     params:
       target:
-      - "192.168.24.82"
+      - "192.168.24.90"
     relabelings:
     - sourceLabels: []
       targetLabel: bmc_target
-      replacement: "192.168.24.82"
+      replacement: "192.168.24.90"
     - sourceLabels: []
       targetLabel: node_name
-      replacement: "worker-node-2"
-  - port: metrics
-    interval: 30s
-    path: /metrics
-    params:
-      target:
-      - "192.168.24.91"
-    relabelings:
-    - sourceLabels: []
-      targetLabel: bmc_target
-      replacement: "192.168.24.91"
-    - sourceLabels: []
-      targetLabel: node_name
-      replacement: "worker-node-3"
+      replacement: "restart-srv10"

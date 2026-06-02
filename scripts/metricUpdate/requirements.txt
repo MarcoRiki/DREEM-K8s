@@ -1,0 +1,4 @@
+numpy==2.0.2
+pandas==2.3.3
+prometheus-api-client==0.7.2
+kubernetes==35.0.0

@@ -7,7 +7,6 @@ from forecast import load_data_instance_cpu, basic_prediction, evaluate_predicte
 import logging
 import utils
 from kubernetes import client
-from kubernetes.dynamic import DynamicClient
 import torch
 import torch.nn as nn
 
@@ -255,20 +254,28 @@ def read_cluster_configuration_cm():
 
 def get_active_worker():
     """
-    The function returns the number of active machine in the managed cluster, without considering the control-plane
+    The function returns the number of active nodes in the managed cluster.
+    Only worker nodes that are Ready are counted.
     """
-    k8s_client = client.ApiClient()
-    dyn_client = DynamicClient(k8s_client)
-
-    # get machines
-    machine_resource = dyn_client.resources.get(api_version="cluster.x-k8s.io/v1beta1", kind="Machine")
-    machines = machine_resource.get()
+    v1 = client.CoreV1Api()
+    nodes = v1.list_node()
 
     active_nodes = 0
-    for machine in machines.items:
-        labels = machine.metadata.labels or {}
+    for node in nodes.items:
+        labels = node.metadata.labels or {}
 
-        if labels["cluster.x-k8s.io/control-plane"] != "":
+        if "node-role.kubernetes.io/control-plane" in labels:
+            continue
+        if "node-role.kubernetes.io/master" in labels:
+            continue
+
+        is_ready = False
+        for condition in node.status.conditions or []:
+            if condition.type == "Ready" and condition.status == "True":
+                is_ready = True
+                break
+
+        if is_ready:
             active_nodes += 1
 
     return active_nodes

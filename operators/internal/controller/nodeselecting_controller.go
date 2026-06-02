@@ -137,7 +137,8 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 
 	selectedNode := ""
 
-	// get the list of available nodes in the cluster, apart the control plane (excldue node with label node-role.kubernetes.io/control-plane)
+	// get the list of available nodes in the cluster.
+	// Keep only worker nodes that are NotReady, because they represent powered-off nodes.
 	nodeList := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
@@ -146,9 +147,25 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 	}
 	nodeListFiltered := corev1.NodeList{}
 	for _, node := range nodeList.Items {
-		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; !isControlPlane {
-			nodeListFiltered.Items = append(nodeListFiltered.Items, node)
+		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; isControlPlane {
+			continue
 		}
+		if _, isMaster := node.Labels["node-role.kubernetes.io/master"]; isMaster {
+			continue
+		}
+
+		isReady := false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+				isReady = true
+				break
+			}
+		}
+		if isReady {
+			continue
+		}
+
+		nodeListFiltered.Items = append(nodeListFiltered.Items, node)
 	}
 
 	rankedNodes, err := ApplySoftConstraintsScaleUp(ctx, nodeListFiltered, k8sClient, *nodeSelecting)
@@ -174,7 +191,8 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 
 	selectedNode := ""
 
-	// get the list of available nodes in the cluster, apart the control plane (excldue node with label node-role.kubernetes.io/control-plane)
+	// get the list of available nodes in the cluster.
+	// Keep only worker nodes that are NotReady, because they represent powered-off nodes.
 	nodeList := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
@@ -183,9 +201,15 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	}
 	nodeListFiltered := &corev1.NodeList{}
 	for _, node := range nodeList.Items {
-		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; !isControlPlane {
-			nodeListFiltered.Items = append(nodeListFiltered.Items, node)
+		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; isControlPlane {
+			continue
 		}
+		if _, isMaster := node.Labels["node-role.kubernetes.io/master"]; isMaster {
+			continue
+		}
+
+		nodeListFiltered.Items = append(nodeListFiltered.Items, node)
+		klog.V(3).Info("Node candidate for scale down:", "node", node.Name)
 	}
 
 	nodeList = nodeListFiltered

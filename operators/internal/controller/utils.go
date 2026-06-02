@@ -18,7 +18,6 @@ var (
 	DREEM_WEIGHTS_SCALE_UP_CM_NAME      = "selection-weights-scale-up"
 	DREEM_POWER_CYCLE_ANNOTATION        = "dreemk8s.io/power-cycle-count"
 	DREEM_ENERGY_EFFICIENCY_ANNOTATION  = "dreemk8s.io/consumption-profile"
-	CAPI_MACHINE_DEPLOYMENT_LABEL       = "cluster.x-k8s.io/deployment-name"
 	TEMPLATE_REDFISH_ENDPOINT           = "https://%s/redfish/v1/Systems/%s/Actions/ComputerSystem.Reset"
 )
 

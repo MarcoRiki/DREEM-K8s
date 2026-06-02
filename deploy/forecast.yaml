@@ -15,10 +15,20 @@ spec:
       labels:
         app: forecast
     spec:
+      # schedule only on the k3s control-plane node and tolerate control-plane/master taints
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
       serviceAccountName: forecast-sa
       containers:
       - name: forecast
-        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/forecast:0.0.27
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/forecast:0.0.31
         args: ["--start-after", "5", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",  "--rate-interval", "10m"]  
 
 ---

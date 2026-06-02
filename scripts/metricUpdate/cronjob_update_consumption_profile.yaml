@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: update-consumption-profile
+  namespace: dreem
+spec:
+  schedule: "*/15 * * * *" # Esegue ogni 15 minuti
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: forecast-sa
+          containers:
+            - name: update-consumption-profile
+              image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/energy-profile-update:0.0.2
+              imagePullPolicy: Always
+              args: [ "--prometheus-url", "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090", "--hours", "24", "--step", "30" ]
+          restartPolicy: OnFailure
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: forecast-sa
+  namespace: dreem
+
+---
+# ClusterRole granting minimal permissions to read and annotate Nodes
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metric-update-node-writer
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+---
+# Bind the ClusterRole to the ServiceAccount in the dreem namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metric-update-node-writer-binding
+subjects:
+  - kind: ServiceAccount
+    name: forecast-sa
+    namespace: dreem
+roleRef:
+  kind: ClusterRole
+  name: metric-update-node-writer
+  apiGroup: rbac.authorization.k8s.io

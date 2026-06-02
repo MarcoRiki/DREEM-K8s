@@ -2,7 +2,6 @@ from kubernetes import config
 import logging
 import os
 from kubernetes import client
-from kubernetes.dynamic import DynamicClient
 import base64
 import tempfile
 import yaml
