@@ -84,23 +84,25 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 	klog.FromContext(ctx).WithName("handle-running-phase")
 
 	selectedNode := ""
+	msg := ""
 
 	if nodeSelecting.Spec.ScalingLabel < 0 {
 		klog.V(2).Info("Trying to scale down infrastructure")
-		err, node := r.selectNodeScaleDown(ctx, nodeSelecting)
-		klog.V(2).Info("selectNodeScaleDown returned", "error", err, "selectedNode", node)
+		err, message, node := r.selectNodeScaleDown(ctx, nodeSelecting)
 		if err != nil {
 			return err
 		}
 		selectedNode = node
+		msg = message
 
 	} else if nodeSelecting.Spec.ScalingLabel > 0 {
 		klog.V(2).Info("Trying to scale up infrastructure")
-		err, node := r.selectNodeScaleUp(ctx, nodeSelecting, r.Client)
+		err, message, node := r.selectNodeScaleUp(ctx, nodeSelecting, r.Client)
 		if err != nil {
 			return err
 		}
 		selectedNode = node
+		msg = message
 	}
 
 	if selectedNode == "" {
@@ -119,7 +121,7 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 
 		klog.V(2).Info("Node selected", "node", selectedNode)
 		nodeSelecting.Status.SelectedNode = selectedNode
-
+		nodeSelecting.Status.Message = msg
 		nodeSelecting.Status.Phase = v1alpha1.NS_PhaseCompleted
 	}
 	klog.V(2).Info("Updating NodeSelecting status", "phase", nodeSelecting.Status.Phase)
@@ -132,7 +134,7 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 
 }
 
-func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, k8sClient client.Client) (error, string) {
+func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, k8sClient client.Client) (error, string, string) {
 	klog.FromContext(ctx).WithName("can-scale-up")
 
 	selectedNode := ""
@@ -142,7 +144,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 	nodeList := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
-		return err, ""
+		return err, "", ""
 
 	}
 	nodeListFiltered := corev1.NodeList{}
@@ -172,21 +174,21 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection in scale up")
-		return err, ""
+		return err, "", ""
 	}
 
 	if len(rankedNodes) == 0 {
 		klog.V(2).Info("No machine deployments available after applying soft constraints")
-		return nil, ""
+		return nil, "", ""
 	}
 
 	selectedNode = rankedNodes[0].Name
 	klog.V(3).Info("SELECTED node:", selectedNode)
 
-	return nil, selectedNode
+	return nil, "", selectedNode
 }
 
-func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) (error, string) {
+func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) (error, string, string) {
 	klog.FromContext(ctx).WithName("can-scale-down")
 
 	selectedNode := ""
@@ -196,7 +198,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	nodeList := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
-		return err, ""
+		return err, "", ""
 
 	}
 	nodeListFiltered := &corev1.NodeList{}
@@ -258,30 +260,32 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 		// check hard-constraints
 
 		valid = CheckResources(combinations)
-		klog.V(3).Info("Valid after resources check:", "count", len(valid), "node", node.Name)
+		klog.V(3).Info("Valid after resources check:", "count ", len(valid), " node ", node.Name)
 		valid = CheckNodeAffinity(valid)
-		klog.V(3).Info("Valid after node affinity check:", "count", len(valid), "node", node.Name)
+		klog.V(3).Info("Valid after node affinity check:", "count ", len(valid), " node ", node.Name)
 		valid = CheckTaints(valid)
-		klog.V(3).Info("Valid after taints check:", "count", len(valid), "node", node.Name)
-		klog.V(3).Info("Checking inter-pod affinity", "node", node.Name)
+		klog.V(3).Info("Valid after taints check:", "count ", len(valid), " node ", node.Name)
+		klog.V(3).Info("Checking inter-pod affinity: ", "node", node.Name)
 		valid = CheckInterPodAffinity(ctx, r.Client, valid)
-		klog.V(3).Info("Valid after inter-pod affinity check:", "count", len(valid), "node", node.Name)
-		klog.V(3).Infof("Node %s: %d valid scheduling configurations found after hard-constraints check", node.Name, len(valid))
+		klog.V(3).Info("Valid after inter-pod affinity check: ", " count ", len(valid), " node ", node.Name)
+		valid = CheckTopologySpreadConstraints(ctx, r.Client, valid)
+		klog.V(3).Info("Valid after topology spread constraints check: ", " count ", len(valid), " node ", node.Name)
+		klog.V(3).Infof("Node %s: %d valid scheduling configurations found after hard-constraints check ", node.Name, len(valid))
 		if len(valid) == 0 {
-			klog.V(3).Info("No valid scheduling found for node", "node", node.Name)
+			klog.V(3).Info("No valid scheduling found for node ", " node ", node.Name)
 			continue
 		} else {
 			total_valid = append(total_valid, valid...)
 		}
 		// if at least one valid configuration is found, the node can be shutdown
-		klog.V(3).Info("Valid scheduling found for node", "node", node.Name)
+		klog.V(3).Info("Valid scheduling found for node ", " node ", node.Name)
 		validNodeToShutdown = append(validNodeToShutdown, node)
 	}
 	// fmt.Printf("Total %d nodes can be shutdown after hard constraints check\n", len(validNodeToShutdown))
 
 	if len(validNodeToShutdown) == 0 {
 		klog.V(3).Info("No node can be shutdown after checking hard constraints")
-		return nil, selectedNode
+		return nil, "", selectedNode
 	}
 
 	// Check if there's at least one non-empty combination
@@ -294,7 +298,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	}
 	if !hasNonEmptyCombination {
 		klog.V(3).Info("All combinations are empty, no valid scheduling configuration found")
-		return nil, selectedNode
+		return nil, "", selectedNode
 	}
 
 	// select randomly one of the valid nodes to shutdown
@@ -305,23 +309,23 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 		index, _ = rand.Int(rand.Reader, big.NewInt(int64(len(total_valid))))
 	}
 
-	klog.V(2).Info("Calling ApplySoftConstraints", "numAssignments", len(total_valid[index.Int64()]), "numNodes", len(validNodeToShutdown))
-	rankedNodes, err := ApplySoftConstraints(total_valid[index.Int64()], validNodeToShutdown, ctx, r.Client, *nodeSelecting)
-	klog.V(2).Info("ApplySoftConstraints returned", "hasError", err != nil, "numRankedNodes", len(rankedNodes))
+	klog.V(2).Info("Calling ApplySoftConstraints ", " numAssignments ", len(total_valid[index.Int64()]), " numNodes ", len(validNodeToShutdown))
+	rankedNodes, message, err := ApplySoftConstraints(total_valid[index.Int64()], validNodeToShutdown, ctx, r.Client, *nodeSelecting)
+	klog.V(2).Info("ApplySoftConstraints returned ", " hasError ", err != nil, " numRankedNodes ", len(rankedNodes))
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection")
-		return err, ""
+		return err, "", ""
 	}
 
 	if len(rankedNodes) == 0 {
 		klog.V(2).Info("No nodes available after applying soft constraints")
-		return nil, selectedNode
+		return nil, "", selectedNode
 	}
 
 	selectedNode = rankedNodes[0].Name
 
 	klog.V(2).Info("Scale down selection completed", "selectedNode", selectedNode)
-	return nil, selectedNode
+	return nil, message, selectedNode
 }
 
 // For more details, check Reconcile and its Result here:

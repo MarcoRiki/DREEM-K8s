@@ -97,7 +97,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go -v=3 --max-configurations=10000
+	go run ./cmd/main.go --v=3 --max-configurations=10000
 	
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.

@@ -464,10 +464,149 @@ func matchPodAffinityTerm(pod *corev1.Pod, term *corev1.PodAffinityTerm) bool {
 	return selector.Matches(labels.Set(pod.Labels))
 }
 
-// ----- PV/VOLUME CHECKING -----
+// ---- CHECK TOPOLOGY SPREAD CONSTRAINTS  -----
+func CheckTopologySpreadConstraints(ctx context.Context, r client.Client, combinations []Combination) []Combination {
+	validCombinations := make([]Combination, 0)
 
-func checkVolumes(combo []Combination) []Combination {
-	return nil
+	// 1. Recuperiamo l'elenco completo dei nodi del cluster
+	var allNodes corev1.NodeList
+	if err := r.List(ctx, &allNodes); err != nil {
+		klog.V(2).ErrorS(err, "Failed to list nodes for topology spread check")
+		return combinations // In caso di errore, restituiamo l'input per non bloccare l'intero ciclo
+	}
+
+	// 2. Recuperiamo l'elenco completo dei pod del cluster
+	var allPods corev1.PodList
+	if err := r.List(ctx, &allPods); err != nil {
+		klog.V(2).ErrorS(err, "Failed to list pods for topology spread check")
+		return combinations
+	}
+
+	// 3. Analizziamo ogni singola combinazione candidata
+	for _, comb := range combinations {
+		isValidCombination := true
+
+		// Per ogni combinazione, cicliamo sui pod che stiamo ricollocando
+		for _, assignment := range comb {
+			pod := assignment.Pod
+
+			// Se il pod non definisce vincoli di distribuzione topologica, saltiamo
+			if len(pod.Spec.TopologySpreadConstraints) == 0 {
+				continue
+			}
+
+			// Verifichiamo ogni vincolo presente nel pod
+			for _, constraint := range pod.Spec.TopologySpreadConstraints {
+				// Ci interessano solo i vincoli rigidi (Hard Constraints)
+				if constraint.WhenUnsatisfiable == corev1.DoNotSchedule {
+
+					// Calcoliamo lo skew REALE simulando lo scenario di questa combinazione
+					skew := calculateRealSkew(comb, allNodes.Items, allPods.Items, constraint)
+
+					// Se lo skew risultante è maggiore del massimo consentito, la combinazione viene scartata
+					if skew > int(constraint.MaxSkew) {
+						isValidCombination = false
+						break // Esci dal ciclo dei vincoli di questo pod
+					}
+				}
+			}
+			if !isValidCombination {
+				break // Esci dal ciclo dei pod, questa combinazione è già invalida
+			}
+		}
+
+		// Se la combinazione ha superato i controlli di tutti i pod, la aggiungiamo a quelle valide
+		if isValidCombination {
+			validCombinations = append(validCombinations, comb)
+		}
+	}
+
+	return validCombinations
+}
+
+func calculateRealSkew(comb Combination, allNodes []corev1.Node, allPods []corev1.Pod, constraint corev1.TopologySpreadConstraint) int {
+	topoKey := constraint.TopologyKey
+	counts := make(map[string]int)
+
+	// Mappe per tracciare la movimentazione dei pod in questa specifica combinazione
+	movedPodsNewNode := make(map[string]string) // Pod.Name -> Nome del nodo di destinazione
+	movedPodsOldNode := make(map[string]string) // Pod.Name -> Nome del nodo di provenienza attuale
+
+	for _, assignment := range comb {
+		podName := assignment.Pod.Name
+		movedPodsNewNode[podName] = assignment.Node.Name
+		movedPodsOldNode[podName] = assignment.Pod.Spec.NodeName
+	}
+
+	// Mappa di appoggio per risalire alla zona/dominio partendo dal nome di un nodo
+	nodeToZone := make(map[string]string)
+	for _, node := range allNodes {
+		if zoneVal, ok := node.Labels[topoKey]; ok {
+			counts[zoneVal] = 0 // Inizializziamo a 0 tutti i domini fisicamente esistenti nel cluster
+			nodeToZone[node.Name] = zoneVal
+		}
+	}
+
+	// STEP 1: Conteggio dei Pod statici (quelli non influenzati da questa combinazione)
+	for _, pod := range allPods {
+		// Ignoriamo i pod che sono già terminati
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+
+		// Se questo pod fa parte di quelli che stiamo spostando, lo saltiamo adesso.
+		// Verrà conteggiato nel prossimo step all'interno del suo nuovo nodo.
+		if _, isMoving := movedPodsOldNode[pod.Name]; isMoving {
+			continue
+		}
+
+		// Verifichiamo se le label del pod corrispondono al LabelSelector del vincolo
+		if constraint.LabelSelector != nil {
+			selector, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
+			if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
+				continue // Se non corrisponde, non impatta questa metrica topologica
+			}
+		}
+
+		// Incrementiamo il contatore del dominio in cui risiede il pod statico
+		if zoneVal, ok := nodeToZone[pod.Spec.NodeName]; ok {
+			counts[zoneVal]++
+		}
+	}
+
+	// STEP 2: Conteggio dei Pod in movimento (aggiunti virtualmente ai nodi di destinazione)
+	for _, assignment := range comb {
+		if constraint.LabelSelector != nil {
+			selector, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
+			if err != nil || !selector.Matches(labels.Set(assignment.Pod.Labels)) {
+				continue
+			}
+		}
+
+		targetNodeName := assignment.Node.Name
+		if zoneVal, ok := nodeToZone[targetNodeName]; ok {
+			counts[zoneVal]++
+		}
+	}
+
+	// Se nessun dominio ha registrato pod corrispondenti al selettore, lo skew è zero
+	if len(counts) == 0 {
+		return 0
+	}
+
+	// STEP 3: Calcolo effettivo dello Skew (Max Pods - Min Pods tra i vari domini)
+	maxCount := 0
+	minCount := math.MaxInt32
+	for _, count := range counts {
+		if count > maxCount {
+			maxCount = count
+		}
+		if count < minCount {
+			minCount = count
+		}
+	}
+
+	return maxCount - minCount
 }
 
 // ---- SOFT CONSTRAINTS (PREFERENCES) -----
@@ -480,6 +619,7 @@ type TOPSISCriteria struct {
 	PrefererredInterPodAffinity   int     // benefit, to maximize
 	PreferredInterPodAntiAffinity int     // benefit, to maximize
 	NumberOfRunningPods           int     // cost, to minimize
+	TopologySpreadScore           int     // benefit, to maximize (higher values represent better distribution of pods across topology domains)
 }
 
 type TOPSISCriteriaScaleUp struct {
@@ -506,6 +646,7 @@ type AHPweights struct {
 	PrefererredInterPodAffinity   float64
 	PreferredInterPodAntiAffinity float64
 	NumberOfRunningPods           float64
+	TopologySpread                float64
 }
 
 type AHPweightsScaleUp struct {
@@ -520,6 +661,7 @@ type ahpProfileCM struct {
 	EnergyProfile            string `yaml:"EnergyProfile"`
 	PowerCycles              string `yaml:"PowerCycles"`
 	NumberOfRunningPods      string `yaml:"NumberOfRunningPods"`
+	TopologySpread           string `yaml:"TopologySpread"`
 }
 
 func ApplySoftConstraintsScaleUp(ctx context.Context, nodes corev1.NodeList, k8sClient client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, error) {
@@ -588,11 +730,12 @@ func ApplySoftConstraintsScaleUp(ctx context.Context, nodes corev1.NodeList, k8s
 	return rankedNodes, nil
 }
 
-func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx context.Context, client client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, error) {
+func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx context.Context, client client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, string, error) {
 	klog.FromContext(ctx).WithName("Apply-TOPSIS-scale-down")
 	klog.V(2).Info("Applying soft constraints with TOPSIS")
 	// Fill the structure with criteria values
 	var criteriaList []TOPSISCriteria
+	var message = "Values for TOPSIS scale down evaluation: | "
 	for _, node := range nodes {
 
 		// get number of running pods
@@ -632,7 +775,14 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 			continue
 		}
 
-		klog.V(3).Info("NODE:", node.Name, " POWER CYCLE:", powerCycle, " ENERGY PROFILE:", energyProfile, " PREF NODE AFFINITY:", preferredNodeAffinity, " PREF INTER-POD AFFINITY:", preferredInterPodAffinity, " PREF INTER-POD ANTI-AFFINITY:", preferredInterPodAntiAffinity, " NUM PODS:", numPods)
+		// get topology spread score
+		topologySpreadScore, err := GetTopologySpreadScore(ctx, client, validScheduling, node)
+		if err != nil {
+			klog.V(2).ErrorS(err, "Failed to get topology spread score for node", "node", node.Name)
+			continue
+		}
+		message += fmt.Sprintf("Node %s: Power Cycle: %d, Energy Profile: %.2f, Preferred Node Affinity: %d, Preferred Inter-Pod Affinity: %d, Preferred Inter-Pod Anti-Affinity: %d, Number of Running Pods: %d, Topology Spread Score: %d | ", node.Name, powerCycle, energyProfile, preferredNodeAffinity, preferredInterPodAffinity, preferredInterPodAntiAffinity, numPods, topologySpreadScore)
+		klog.V(3).Info("NODE: ", node.Name, " POWER CYCLE:", powerCycle, " ENERGY PROFILE:", energyProfile, " PREF NODE AFFINITY:", preferredNodeAffinity, " PREF INTER-POD AFFINITY:", preferredInterPodAffinity, " PREF INTER-POD ANTI-AFFINITY:", preferredInterPodAntiAffinity, " NUM PODS:", numPods, " TOPOLOGY SPREAD SCORE:", topologySpreadScore)
 
 		criteria := TOPSISCriteria{
 			Node:                          node,
@@ -641,6 +791,7 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 			PreferredNodeAffinity:         preferredNodeAffinity,
 			PrefererredInterPodAffinity:   preferredInterPodAffinity,
 			PreferredInterPodAntiAffinity: preferredInterPodAntiAffinity,
+			TopologySpreadScore:           topologySpreadScore,
 			NumberOfRunningPods:           numPods,
 		}
 		criteriaList = append(criteriaList, criteria)
@@ -649,20 +800,20 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 	// Check if we have any valid criteria
 	if len(criteriaList) == 0 {
 		klog.V(2).Info("No valid criteria collected for TOPSIS evaluation, all nodes had errors during data collection")
-		return []corev1.Node{}, nil
+		return []corev1.Node{}, "", nil
 	}
 
 	// load weights
 	weights, err := LoadAHPweights(client, ctx)
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to load AHP weights")
-		return nil, err
+		return nil, "", err
 	}
 	// apply TOPSIS
 	rankedNodes, err := ApplyTOPSIS(criteriaList, weights, nodeSelecting, client, ctx)
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply TOPSIS")
-		return nil, err
+		return nil, "", err
 	}
 
 	// extract ordered node list
@@ -671,7 +822,7 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 		nodes = append(nodes, crit.Node)
 	}
 
-	return nodes, nil
+	return nodes, message, nil
 }
 
 func GetPowerCycle(node corev1.Node, ctx context.Context, k8sClient client.Client) (int, error) {
@@ -926,6 +1077,7 @@ func LoadAHPweights(managementClusterClient client.Client, ctx context.Context) 
 		EnergyProfile:                 parse(parsed.EnergyProfile),
 		PowerCycle:                    parse(parsed.PowerCycles),
 		NumberOfRunningPods:           parse(parsed.NumberOfRunningPods),
+		TopologySpread:                parse(parsed.TopologySpread),
 	}, nil
 }
 
@@ -1104,6 +1256,7 @@ func MakeEvaluationMatrix(criteriaList []TOPSISCriteria) []map[string]float64 {
 			"PrefererredInterPodAffinity":   float64(crit.PrefererredInterPodAffinity),
 			"PreferredInterPodAntiAffinity": float64(crit.PreferredInterPodAntiAffinity),
 			"NumberOfRunningPods":           float64(crit.NumberOfRunningPods),
+			"TopologySpreadScore":           float64(crit.TopologySpreadScore),
 		}
 	}
 	return evalMatrix
@@ -1197,6 +1350,8 @@ func WeightMatrix(matrix []map[string]float64, weights AHPweights) []map[string]
 				weight = weights.PreferredInterPodAntiAffinity
 			case "NumberOfRunningPods":
 				weight = weights.NumberOfRunningPods
+			case "TopologySpread":
+				weight = weights.TopologySpread
 			default:
 				weight = 1.0
 			}
@@ -1216,6 +1371,7 @@ func CalculateIdealSolutions(matrix []map[string]float64) (map[string]float64, m
 	// PrefererredInterPodAffinity: cost
 	// PreferredInterPodAntiAffinity: cost
 	// NumberOfRunningPods: cost
+	// TopologySpreadScore: benefit
 
 	numCriteria := len(matrix[0])
 	ideal := make(map[string]float64, numCriteria)
@@ -1235,7 +1391,7 @@ func CalculateIdealSolutions(matrix []map[string]float64) (map[string]float64, m
 
 		// determine ideal and negative-ideal based on criteria type
 		switch key {
-		case "EnergyProfile": // benefit
+		case "EnergyProfile", "TopologySpreadScore": // benefit
 			ideal[key] = maxFloat64(values)
 			negativeIdeal[key] = minFloat64(values)
 		default: // cost
@@ -1351,4 +1507,67 @@ func SortMachineDeploymentsByCloseness(rankedNodes []RankedMachineDeployment) []
 	}
 
 	return sorted
+}
+
+func GetTopologySpreadScore(ctx context.Context, r client.Client, comb Combination, currentNode corev1.Node) (int, error) {
+	score := 0
+
+	// 1. Recuperiamo i nodi del cluster
+	var allNodes corev1.NodeList
+	if err := r.List(ctx, &allNodes); err != nil {
+		return 0, err
+	}
+
+	// 2. Recuperiamo i pod del cluster
+	var allPods corev1.PodList
+	if err := r.List(ctx, &allPods); err != nil {
+		return 0, err
+	}
+
+	// 3. Analizziamo i vincoli dei pod
+	for _, assignment := range comb {
+		pod := assignment.Pod
+
+		if len(pod.Spec.TopologySpreadConstraints) == 0 {
+			continue
+		}
+
+		for _, constraint := range pod.Spec.TopologySpreadConstraints {
+			if constraint.WhenUnsatisfiable == corev1.ScheduleAnyway {
+
+				// Calcoliamo lo skew reale della combinazione di base
+				skew := calculateRealSkew(comb, allNodes.Items, allPods.Items, constraint)
+
+				// === DINAMICITÀ BASATA SUL NODO ===
+				// Se il nodo corrente appartiene allo stesso dominio topologico (es. stessa "zone")
+				// dell'assegnamento corrente, verifichiamo se l'aggiunta incrementa lo sbilanciamento.
+				topoKey := constraint.TopologyKey
+				if currentZone, ok := currentNode.Labels[topoKey]; ok {
+					if targetZone, exists := assignment.Node.Labels[topoKey]; exists && currentZone == targetZone {
+						// Questo nodo fa parte del dominio target: premiamo i nodi che mantengono
+						// o migliorano lo skew, penalizziamo quelli in domini già sovraccarichi.
+						if skew <= int(constraint.MaxSkew) {
+							score += 15 // Bonus maggiore se il nodo aiuta a rispettare il vincolo soft
+						} else {
+							score += 5 // Bonus minimo o nullo se il nodo si trova in una zona già satura
+						}
+						continue
+					}
+				}
+
+				// Comportamento di fallback standard se il nodo è in un altro dominio
+				if skew <= int(constraint.MaxSkew) {
+					score += 10
+				} else {
+					penalita := skew - int(constraint.MaxSkew)
+					punteggioParziale := 10 - penalita
+					if punteggioParziale > 0 {
+						score += punteggioParziale
+					}
+				}
+			}
+		}
+	}
+
+	return score, nil
 }
