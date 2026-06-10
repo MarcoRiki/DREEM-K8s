@@ -34,7 +34,7 @@ spec:
       # This uses nodeSelector to target control-plane nodes and tolerations
       # so the pod can be scheduled even if control-plane nodes are tainted.
       nodeSelector:
-        node-role.kubernetes.io/control-plane: ""
+        node-role.kubernetes.io/control-plane: "true"
       tolerations:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
@@ -76,8 +76,8 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-          - --max-configurations=10000
-        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.19
+          - --max-configurations=50000
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.21
         imagePullPolicy: IfNotPresent
         
         name: manager
@@ -103,11 +103,11 @@ spec:
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
-            cpu: 1500m
-            memory: 2048Mi
+            cpu: 2500m
+            memory: 4096Mi
           requests:
-            cpu: 512m
-            memory: 512Mi
+            cpu: 256m
+            memory: 256Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager

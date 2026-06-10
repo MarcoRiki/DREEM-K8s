@@ -615,11 +615,11 @@ type TOPSISCriteria struct {
 	Node                          corev1.Node
 	PowerCycle                    int     // cost, to minimize
 	EnergyProfile                 float64 // benefit, to maximize in scale down (higher values represent higher consumption, so worse nodes)
-	PreferredNodeAffinity         int     // benefit, to maximize
-	PrefererredInterPodAffinity   int     // benefit, to maximize
-	PreferredInterPodAntiAffinity int     // benefit, to maximize
+	PreferredNodeAffinity         int     // cost, to minimize (higher values represent more preferred node affinity rules, so better nodes)
+	PrefererredInterPodAffinity   int     // cost, to minimize (higher values represent more preferred pod affinity rules, so better nodes)
+	PreferredInterPodAntiAffinity int     // cost, to minimize (higher values represent more preferred pod anti-affinity rules, so better nodes)
 	NumberOfRunningPods           int     // cost, to minimize
-	TopologySpreadScore           int     // benefit, to maximize (higher values represent better distribution of pods across topology domains)
+	TopologySpreadScore           int     // cost, to minimize (higher values represent better distribution of pods across topology domains, therefore the node must be less preferred for scale down)
 }
 
 type TOPSISCriteriaScaleUp struct {
@@ -1371,7 +1371,7 @@ func CalculateIdealSolutions(matrix []map[string]float64) (map[string]float64, m
 	// PrefererredInterPodAffinity: cost
 	// PreferredInterPodAntiAffinity: cost
 	// NumberOfRunningPods: cost
-	// TopologySpreadScore: benefit
+	// TopologySpreadScore: cost
 
 	numCriteria := len(matrix[0])
 	ideal := make(map[string]float64, numCriteria)
@@ -1391,7 +1391,7 @@ func CalculateIdealSolutions(matrix []map[string]float64) (map[string]float64, m
 
 		// determine ideal and negative-ideal based on criteria type
 		switch key {
-		case "EnergyProfile", "TopologySpreadScore": // benefit
+		case "EnergyProfile": // benefit
 			ideal[key] = maxFloat64(values)
 			negativeIdeal[key] = minFloat64(values)
 		default: // cost
