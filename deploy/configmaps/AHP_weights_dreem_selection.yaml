@@ -5,13 +5,13 @@ metadata:
   namespace: dreem
 data:
   energy: |
-    PreferredNodeAffinity: "0.0089"
-    PreferredPodAffinity: "0.0164"
-    PreferredPodAntiAffinity: "0.0164"
-    EnergyProfile: "0.6944"
-    PowerCycles: "0.1689"
-    NumberOfRunningPods: "0.0625"
-    TopologySpread: "0.0625"
+    PreferredNodeAffinity: "0.0053"
+    PreferredPodAffinity: "0.0098"
+    PreferredPodAntiAffinity: "0.0098"
+    EnergyProfile: "0.7500"
+    PowerCycles: "0.1500"
+    NumberOfRunningPods: "0.0375"
+    TopologySpread: "0.0375"
   neutral: |
     PreferredNodeAffinity: "0.0267"
     PreferredPodAffinity: "0.0492"
@@ -21,10 +21,10 @@ data:
     NumberOfRunningPods: "0.1874"
     TopologySpread: "0.1874"
   qos: |
-    PreferredNodeAffinity: "0.0445"
-    PreferredPodAffinity: "0.0821"
-    PreferredPodAntiAffinity: "0.0821"
-    EnergyProfile: "0.1389"
-    PowerCycles: "0.0278"
-    NumberOfRunningPods: "0.3124"
-    TopologySpread: "0.3124"
+    PreferredNodeAffinity: "0.0480"
+    PreferredPodAffinity: "0.0886"
+    PreferredPodAntiAffinity: "0.0886"
+    EnergyProfile: "0.0833"
+    PowerCycles: "0.0167"
+    NumberOfRunningPods: "0.3373"
+    TopologySpread: "0.3373"

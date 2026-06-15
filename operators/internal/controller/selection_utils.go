@@ -809,6 +809,7 @@ func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx
 		klog.V(2).ErrorS(err, "Failed to load AHP weights")
 		return nil, "", err
 	}
+	klog.V(2).Info("AHP weights loaded successfully: ", weights)
 	// apply TOPSIS
 	rankedNodes, err := ApplyTOPSIS(criteriaList, weights, nodeSelecting, client, ctx)
 	if err != nil {
@@ -1018,7 +1019,6 @@ func GetNumberOfRunningPods(node corev1.Node, ctx context.Context, k8sClient cli
 }
 
 func LoadAHPweights(managementClusterClient client.Client, ctx context.Context) (AHPweights, error) {
-
 	// Read selection profile from cluster-configuration-parameters
 	clusterCM := &corev1.ConfigMap{}
 	err := managementClusterClient.Get(
@@ -1160,13 +1160,19 @@ func ApplyTOPSIS(criteriaList []TOPSISCriteria, weights AHPweights, nodeSelectin
 
 	// 4. Determine the ideal and negative-ideal solutions.
 	idealSolution, negativeIdealSolution := CalculateIdealSolutions(weightedMatrix)
+	klog.V(3).Info("Ideal Solution for nodeselecting ", nodeSelecting.Name, ": ", idealSolution)
+	klog.V(3).Info("Negative Ideal Solution for nodeselecting ", nodeSelecting.Name, ": ", negativeIdealSolution)
 
 	// 5. Calculate the separation measures for each alternative.
 	separationFromIdeal, separationFromNegativeIdeal := CalculateSeparationMeasures(weightedMatrix, idealSolution, negativeIdealSolution)
 
 	// 6. Calculate the relative closeness to the ideal solution.
 	relativeCloseness := CalculateRelativeCloseness(separationFromIdeal, separationFromNegativeIdeal)
-
+	klog.V(3).Info("Relative Closeness to Ideal Solution for nodeselecting ", nodeSelecting.Name, ": ")
+	klog.V(3).Info("Node\tRelative Closeness")
+	for i, crit := range criteriaList {
+		klog.V(3).Info(crit.Node.Name, "\t", relativeCloseness[i])
+	}
 	// 6.5 Associate relative closeness to criteriaList (new matrix)
 	rankedNodes := make([]RankedNode, len(criteriaList))
 	for i, crit := range criteriaList {
@@ -1178,13 +1184,6 @@ func ApplyTOPSIS(criteriaList []TOPSISCriteria, weights AHPweights, nodeSelectin
 
 	// 7. Rank the alternatives based on their relative closeness: the higher, the better
 	sortedRankedNodes := SortNodesByCloseness(rankedNodes)
-	// nodes := []string{}
-	// name := "scaleDown_" + time.Now().Format("20060102_150405")
-	// for _, crit := range criteriaList {
-	// 	nodes = append(nodes, crit.Node.Name)
-	// }
-	// saveMatrixToJSON(name+".json", weightedMatrix, nodes, nodeSelecting, managementClusterClient, ctx)
-
 	return sortedRankedNodes, nil
 }
 
@@ -1547,9 +1546,9 @@ func GetTopologySpreadScore(ctx context.Context, r client.Client, comb Combinati
 						// Questo nodo fa parte del dominio target: premiamo i nodi che mantengono
 						// o migliorano lo skew, penalizziamo quelli in domini già sovraccarichi.
 						if skew <= int(constraint.MaxSkew) {
-							score += 15 // Bonus maggiore se il nodo aiuta a rispettare il vincolo soft
+							score += 3 // Bonus maggiore se il nodo aiuta a rispettare il vincolo soft
 						} else {
-							score += 5 // Bonus minimo o nullo se il nodo si trova in una zona già satura
+							score += 1 // Bonus minimo o nullo se il nodo si trova in una zona già satura
 						}
 						continue
 					}
@@ -1557,10 +1556,10 @@ func GetTopologySpreadScore(ctx context.Context, r client.Client, comb Combinati
 
 				// Comportamento di fallback standard se il nodo è in un altro dominio
 				if skew <= int(constraint.MaxSkew) {
-					score += 10
+					score += 2
 				} else {
 					penalita := skew - int(constraint.MaxSkew)
-					punteggioParziale := 10 - penalita
+					punteggioParziale := 2 - penalita
 					if punteggioParziale > 0 {
 						score += punteggioParziale
 					}
