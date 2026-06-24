@@ -77,7 +77,7 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --max-configurations=50000
-        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.21
+        image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/dreem-operator:0.0.26
         imagePullPolicy: IfNotPresent
         
         name: manager

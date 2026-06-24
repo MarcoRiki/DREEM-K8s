@@ -194,7 +194,7 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	selectedNode := ""
 
 	// get the list of available nodes in the cluster.
-	// Keep only worker nodes that are NotReady, because they represent powered-off nodes.
+	// Keep only worker nodes that are Ready, because they represent powered-on nodes.
 	nodeList := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
@@ -207,6 +207,17 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 			continue
 		}
 		if _, isMaster := node.Labels["node-role.kubernetes.io/master"]; isMaster {
+			continue
+		}
+
+		isReady := false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+				isReady = true
+				break
+			}
+		}
+		if !isReady {
 			continue
 		}
 

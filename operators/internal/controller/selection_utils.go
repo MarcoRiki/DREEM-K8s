@@ -886,6 +886,7 @@ func GetPreferredNodeAffinity(node corev1.Node, validSchedulingConfig []Assignme
 
 	totalWeight := 0
 	for _, assignment := range validSchedulingConfig {
+		klog.V(4).Infof("[DEBUG-AFFINITY] Evaluating preferred node affinity for Pod %s on Node %s", assignment.Pod.Name, node.Name)
 		pod := assignment.Pod
 		if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil {
 			continue
@@ -893,6 +894,7 @@ func GetPreferredNodeAffinity(node corev1.Node, validSchedulingConfig []Assignme
 
 		preferred := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
 		for _, term := range preferred {
+			klog.V(4).Infof("[DEBUG-AFFINITY] Checking NodeSelectorTerm: %+v against Node Labels: %+v", term.Preference, node.Labels)
 			if matchNodeSelectorTerm(term.Preference, node.Labels) {
 				totalWeight += int(term.Weight)
 			}
@@ -902,56 +904,112 @@ func GetPreferredNodeAffinity(node corev1.Node, validSchedulingConfig []Assignme
 }
 
 func GetPreferredInterPodAffinity(node corev1.Node, validSchedulingConfig []Assignment, managedClusterClient client.Client, ctx context.Context) (int, error) {
+	klog.V(4).Infof("[DEBUG-AFFINITY] === Starting evaluation for Node: %s ===", node.Name)
+	klog.V(4).Infof("[DEBUG-AFFINITY] Node %s Labels: %v", node.Name, node.Labels)
+	klog.V(4).Infof("[DEBUG-AFFINITY] Size of validSchedulingConfig received: %d", len(validSchedulingConfig))
 
-	// reproduce the logic to count preferred node affinity weights used by kube-scheduler
-	// for each pod checks if it has preferred pod affinity to the pods on the selected node
-	// if they match, sum the weight
-
-	// as first, get the pods scheduled on the seelected node
+	// 1. Recuperiamo tutti i pod attualmente in esecuzione sul nodo sotto esame
 	podsOnNode := corev1.PodList{}
 	err := managedClusterClient.List(ctx, &podsOnNode, client.MatchingFields{"spec.nodeName": node.Name})
 	if err != nil {
+		klog.V(4).ErrorS(err, "[DEBUG-AFFINITY] Failed to list pods on node %s", node.Name)
 		return 0, err
 	}
 
-	// check the affinity between the existing pods and the pods to schedule
-	totalWeight := 0
-	for _, assignment := range validSchedulingConfig {
-		pod := assignment.Pod
-		if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAffinity == nil {
-			continue
-		}
+	// Filtriamo i pod di sistema (kube-proxy, calico, ecc.)
+	existingPods := filterSystemPods(podsOnNode.Items)
+	klog.V(4).Infof("[DEBUG-AFFINITY] Node %s has %d total pods, %d after filtering system pods", node.Name, len(podsOnNode.Items), len(existingPods))
 
-		preferred := pod.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution
-		for _, term := range preferred {
-			selector, err := metav1.LabelSelectorAsSelector(term.PodAffinityTerm.LabelSelector)
-			if err != nil {
+	totalWeight := 0
+
+	// 2. VALUTAZIONE 1: Calcoliamo l'affinità interna attuale del nodo (Esistenti vs Esistenti)
+	klog.V(2).Infof("[DEBUG-AFFINITY] Evaluating internal affinity (Existing vs Existing) for %d pods...", len(existingPods))
+	for i := 0; i < len(existingPods); i++ {
+		for j := 0; j < len(existingPods); j++ {
+			if i == j {
 				continue
 			}
-
-			// check against existing pods on the node
-			for _, existingPod := range podsOnNode.Items {
-				// check namespace
-				if len(term.PodAffinityTerm.Namespaces) > 0 {
-					found := false
-					for _, ns := range term.PodAffinityTerm.Namespaces {
-						if ns == existingPod.Namespace {
-							found = true
-							break
-						}
-					}
-					if !found {
-						continue
-					}
-				}
-				if selector.Matches(labels.Set(existingPod.Labels)) {
-					totalWeight += int(term.Weight)
-				}
+			weight := computePodToPodAffinityWeight(&existingPods[i], &existingPods[j])
+			if weight > 0 {
+				klog.V(4).Infof("[DEBUG-AFFINITY] Match found! Existing Pod %s -> Existing Pod %s added weight: %d", existingPods[i].Name, existingPods[j].Name, weight)
+				totalWeight += weight
 			}
 		}
 	}
 
+	// 3. VALUTAZIONE 2: Calcoliamo l'impatto con i pod della combinazione di scheduling corrente (Esistenti vs Nuovi)
+	klog.V(2).Infof("[DEBUG-AFFINITY] Evaluating scheduling config affinity (Existing vs New Incoming Pods)...")
+	for idx, assignment := range validSchedulingConfig {
+		// Logghiamo i dettagli di ogni assignment per capire cosa stiamo valutando
+		klog.V(4).Infof("[DEBUG-AFFINITY] Assignment [%d]: Pod %s is targeted to Node %s", idx, assignment.Pod.Name, assignment.Node.Name)
+
+		if assignment.Node.Name != node.Name {
+			klog.V(4).Infof("[DEBUG-AFFINITY] Assignment [%d] skipped: target node %s does not match current node %s", idx, assignment.Node.Name, node.Name)
+			continue
+		}
+
+		klog.V(4).Infof("[DEBUG-AFFINITY] Assignment [%d] matches node %s. Evaluating against %d existing pods...", idx, node.Name, len(existingPods))
+		for _, existingPod := range existingPods {
+			// Il pod esistente preferisce il nuovo?
+			w1 := computePodToPodAffinityWeight(&existingPod, &assignment.Pod)
+			if w1 > 0 {
+				klog.V(4).Infof("[DEBUG-AFFINITY] Match! Existing Pod %s -> New Pod %s added weight: %d", existingPod.Name, assignment.Pod.Name, w1)
+				totalWeight += w1
+			}
+
+			// Il nuovo pod preferisce quello esistente?
+			w2 := computePodToPodAffinityWeight(&assignment.Pod, &existingPod)
+			if w2 > 0 {
+				klog.V(4).Infof("[DEBUG-AFFINITY] Match! New Pod %s -> Existing Pod %s added weight: %d", assignment.Pod.Name, existingPod.Name, w2)
+				totalWeight += w2
+			}
+		}
+	}
+
+	klog.V(4).Infof("[DEBUG-AFFINITY] === Finished evaluation for Node: %s. Total Affinity Score: %d ===", node.Name, totalWeight)
 	return totalWeight, nil
+}
+
+// Funzione ausiliaria per calcolare il peso dell'affinità preferita tra due Pod specifici con log interni
+func computePodToPodAffinityWeight(podA, podB *corev1.Pod) int {
+	if podA.Spec.Affinity == nil || podA.Spec.Affinity.PodAffinity == nil {
+		return 0
+	}
+
+	weightSum := 0
+	preferred := podA.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+
+	for termIdx, term := range preferred {
+		selector, err := metav1.LabelSelectorAsSelector(term.PodAffinityTerm.LabelSelector)
+		if err != nil {
+			klog.V(4).Infof("[DEBUG-AFFINITY-INTERNAL] Pod %s has invalid label selector in term %d: %v", podA.Name, termIdx, err)
+			continue
+		}
+
+		// Controllo del Namespace
+		if len(term.PodAffinityTerm.Namespaces) > 0 {
+			nsMatch := false
+			for _, ns := range term.PodAffinityTerm.Namespaces {
+				if ns == podB.Namespace {
+					nsMatch = true
+					break
+				}
+			}
+			if !nsMatch {
+				klog.V(4).Infof("[DEBUG-AFFINITY-INTERNAL] Namespace mismatch between Pod %s (ns: %s) and target term namespaces: %v", podB.Name, podB.Namespace, term.PodAffinityTerm.Namespaces)
+				continue
+			}
+		}
+
+		// Controllo effettivo del match dei selettori delle label
+		if selector.Matches(labels.Set(podB.Labels)) {
+			weightSum += int(term.Weight)
+		} else {
+			klog.V(4).Infof("[DEBUG-AFFINITY-INTERNAL] Pod %s labels %v DID NOT MATCH selector %v of Pod %s", podB.Name, podB.Labels, selector, podA.Name)
+		}
+	}
+
+	return weightSum
 }
 func GetPreferredInterPodAntiAffinity(node corev1.Node, validSchedulingConfig []Assignment, managedClusterClient client.Client, ctx context.Context) (int, error) {
 
