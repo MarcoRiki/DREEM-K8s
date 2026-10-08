@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -19,16 +20,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// criterionTopologySpread is the key used for the topology-spread criterion in the
+// evaluation matrix. It is a named constant because MakeEvaluationMatrix and
+// WeightMatrix previously disagreed on its spelling, which silently left the
+// criterion at the default weight of 1.0 in every profile.
+const criterionTopologySpread = "TopologySpreadScore"
+
 // generateCombinations returns all possible node assignments:
 // for each pod, choose one of the candidate nodes.
 // Example: 3 pods, 2 nodes → 8 configurations.
 type Assignment struct {
 	Pod  corev1.Pod
 	Node corev1.Node
+	// AltNode is where the pod lands when the pods are placed in the opposite order
+	// (see BuildMigrationPlan); nil when that order has no feasible placement, in which
+	// case Node stands for both orders.
+	AltNode *corev1.Node
 }
 
 type Combination []Assignment
 
+// Deprecated: GenerateCombinations enumerates nodes^pods assignments, which is
+// exponential and needs sampling to stay bounded. The scale-down path now uses
+// BuildMigrationPlan, which builds one deterministic plan per candidate node in
+// O(pods * candidates). Retained only for the existing unit tests.
+//
 // Generate combinations of assigning pods to candidate nodes.
 // With many pods, this becomes exponential (nodes^pods). To avoid memory issues,
 // we limit the combinations and use sampling if necessary.
@@ -42,10 +58,11 @@ func GenerateCombinations(pods []corev1.Pod, nodes []corev1.Node, maxCombination
 
 	numPods := len(pods)
 	numNodes := len(nodes)
-	total := pow(numNodes, numPods) // combinazioni totali = numNodes^numPods
+	total, ok := pow(numNodes, numPods) // combinazioni totali = numNodes^numPods
 
-	// Limit combinations to avoid memory exhaustion
-	if total > maxCombinations {
+	// Limit combinations to avoid memory exhaustion. !ok means numNodes^numPods
+	// overflowed an int, which is by definition more than maxCombinations.
+	if !ok || total > maxCombinations {
 		klog.V(2).Infof("Too many combinations (%d > %d), sampling subset for pods=%d nodes=%d", total, maxCombinations, numPods, numNodes)
 		return sampleCombinations(pods, nodes, maxCombinations)
 	}
@@ -96,13 +113,18 @@ func sampleCombinations(pods []corev1.Pod, nodes []corev1.Node, maxSamples int) 
 	return combinations
 }
 
-// integer power
-func pow(a, b int) int {
+// pow returns a^b, and false if the result overflows an int. Without the guard a
+// large pod count silently wrapped: 3 nodes ^ 40 pods wraps negative and panics the
+// subsequent make(), while 4 ^ 32 wraps to exactly 0 and yields no combinations at all.
+func pow(a, b int) (int, bool) {
 	res := 1
 	for i := 0; i < b; i++ {
+		if a != 0 && res > math.MaxInt/a {
+			return 0, false
+		}
 		res *= a
 	}
-	return res
+	return res, true
 }
 
 // ----- RESOURCE CHECKING -----
@@ -110,6 +132,377 @@ func pow(a, b int) int {
 type AvailableResources struct {
 	CPU    resource.Quantity
 	Memory resource.Quantity
+}
+
+// podRequests returns the effective CPU and memory requests of a pod, computed the way
+// the kube-scheduler accounts for it. The older podRequestsCPU/podRequestsMemory helpers
+// ignore init containers entirely.
+//
+// Init containers with restartPolicy Always are native sidecars (Istio's istio-proxy is
+// one): they keep running next to the app containers, so their requests add to the
+// pod's total. Treating them as ordinary init containers - taking only the largest one
+// as a floor - counted an Istio pod 100m CPU and 128Mi short, and every resident pod on
+// a destination node the same, so migration plans the scheduler cannot place passed the
+// feasibility check. The effective request is the larger of
+//   - the running phase: app containers plus every sidecar, and
+//   - each regular init container plus the sidecars declared before it, which are
+//     already running while it runs.
+func podRequests(pod *corev1.Pod) AvailableResources {
+	cpu := resource.MustParse("0")
+	mem := resource.MustParse("0")
+	sidecarCPU := resource.MustParse("0")
+	sidecarMem := resource.MustParse("0")
+	initCPU := resource.MustParse("0")
+	initMem := resource.MustParse("0")
+
+	for _, c := range pod.Spec.InitContainers {
+		if isNativeSidecar(&c) {
+			sidecarCPU.Add(c.Resources.Requests[corev1.ResourceCPU])
+			sidecarMem.Add(c.Resources.Requests[corev1.ResourceMemory])
+			continue
+		}
+		stepCPU := c.Resources.Requests[corev1.ResourceCPU].DeepCopy()
+		stepCPU.Add(sidecarCPU)
+		stepMem := c.Resources.Requests[corev1.ResourceMemory].DeepCopy()
+		stepMem.Add(sidecarMem)
+		if stepCPU.Cmp(initCPU) > 0 {
+			initCPU = stepCPU
+		}
+		if stepMem.Cmp(initMem) > 0 {
+			initMem = stepMem
+		}
+	}
+
+	for _, c := range pod.Spec.Containers {
+		cpu.Add(c.Resources.Requests[corev1.ResourceCPU])
+		mem.Add(c.Resources.Requests[corev1.ResourceMemory])
+	}
+	cpu.Add(sidecarCPU)
+	mem.Add(sidecarMem)
+
+	if initCPU.Cmp(cpu) > 0 {
+		cpu = initCPU
+	}
+	if initMem.Cmp(mem) > 0 {
+		mem = initMem
+	}
+	return AvailableResources{CPU: cpu, Memory: mem}
+}
+
+// isNativeSidecar reports whether an init container is a native sidecar
+// (restartPolicy Always), which keeps running for the whole life of the pod.
+func isNativeSidecar(c *corev1.Container) bool {
+	return c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways
+}
+
+// NodeFreeResources returns what is actually still free on a node: its allocatable
+// minus the requests of the pods already running there. CheckResources seeds its
+// budget from bare allocatable instead, so every destination looks empty and plans
+// that cannot really run pass the feasibility check.
+func NodeFreeResources(ctx context.Context, c client.Client, node corev1.Node) (AvailableResources, error) {
+	free := AvailableResources{
+		CPU:    node.Status.Allocatable[corev1.ResourceCPU].DeepCopy(),
+		Memory: node.Status.Allocatable[corev1.ResourceMemory].DeepCopy(),
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods, client.MatchingFields{"spec.nodeName": node.Name}); err != nil {
+		return free, err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		req := podRequests(pod)
+		free.CPU.Sub(req.CPU)
+		free.Memory.Sub(req.Memory)
+	}
+	return free, nil
+}
+
+// BuildMigrationPlan produces one feasible plan moving every pod in pods off
+// drainedNode onto one of candidates, or nil if no such plan exists.
+//
+// This replaces enumerating all nodes^pods assignments and filtering them. That
+// approach was exponential, overflowed for realistic pod counts, and ended with a
+// single surviving plan chosen at random — so the soft criteria were evaluated
+// against an arbitrary scenario that usually belonged to a different node. Here each
+// candidate node gets its own deterministic plan, built in O(pods * candidates^2).
+//
+// The plan imitates the kube-scheduler that will place the evicted pods: one pod at a
+// time, the candidates filtered as its filter plugins would (resources, taints,
+// required node affinity, required pod (anti-)affinity), the pod put on the candidate
+// with the highest score of the default score plugins (see schedulerScores), and free
+// resources and occupants updated after every pod.
+//
+// The scheduler places the recreated pods in an order DREEM does not control, and for
+// pods that prefer to be near each other the order decides whether they end up
+// together. The plan is therefore built in both extreme orders: the returned plan puts
+// the pods that others prefer to be near first (the order that keeps affinity), and
+// every Assignment.AltNode records the destination when they come last. The affinity
+// criteria score both.
+func BuildMigrationPlan(ctx context.Context, c client.Client, drainedNode corev1.Node, candidates []corev1.Node, pods []corev1.Pod) (Combination, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	// A node with nothing to migrate can be switched off for free.
+	if len(pods) == 0 {
+		return Combination{}, nil
+	}
+
+	free := make(map[string]AvailableResources, len(candidates))
+	resident := make(map[string][]corev1.Pod, len(candidates))
+	for i := range candidates {
+		f, err := NodeFreeResources(ctx, c, candidates[i])
+		if err != nil {
+			return nil, err
+		}
+		free[candidates[i].Name] = f
+
+		podsOn := &corev1.PodList{}
+		if err := c.List(ctx, podsOn, client.MatchingFields{"spec.nodeName": candidates[i].Name}); err != nil {
+			return nil, err
+		}
+		resident[candidates[i].Name] = filterSystemPods(podsOn.Items)
+	}
+
+	plan := placePods(orderForPlacement(pods, true), candidates, free, resident, drainedNode.Name)
+	if plan == nil {
+		return nil, nil
+	}
+	if alt := placePods(orderForPlacement(pods, false), candidates, free, resident, drainedNode.Name); alt != nil {
+		altNode := make(map[string]*corev1.Node, len(alt))
+		for i := range alt {
+			altNode[podKey(&alt[i].Pod)] = &alt[i].Node
+		}
+		for i := range plan {
+			plan[i].AltNode = altNode[podKey(&plan[i].Pod)]
+		}
+	}
+
+	// topology spread is a property of the whole plan, so it is checked once at the end
+	if len(CheckTopologySpreadConstraints(ctx, c, []Combination{plan})) == 0 {
+		klog.V(3).Infof("Plan for draining node %s violates a hard topology spread constraint", drainedNode.Name)
+		return nil, nil
+	}
+
+	return plan, nil
+}
+
+// orderForPlacement returns the pods in the order a plan places them. With
+// partnersFirst the pods without preferred pod-affinity terms - the ones others prefer
+// to be near - come before the pods that want to follow them; without it, after them.
+// Within each group the largest pods come first: they are the hardest to place.
+func orderForPlacement(pods []corev1.Pod, partnersFirst bool) []corev1.Pod {
+	ordered := make([]corev1.Pod, len(pods))
+	copy(ordered, pods)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		fi := len(preferredPodAffinityTerms(&ordered[i])) > 0
+		fj := len(preferredPodAffinityTerms(&ordered[j])) > 0
+		if fi != fj {
+			return fi != partnersFirst
+		}
+		ri, rj := podRequests(&ordered[i]), podRequests(&ordered[j])
+		if cmp := ri.CPU.Cmp(rj.CPU); cmp != 0 {
+			return cmp > 0
+		}
+		return ri.Memory.Cmp(rj.Memory) > 0
+	})
+	return ordered
+}
+
+// placePods places the pods in the given order, each on the admissible candidate with
+// the highest scheduler score (ties keep the first candidate), and returns nil if some
+// pod has no admissible candidate. freeInit and resident are not modified.
+func placePods(ordered []corev1.Pod, candidates []corev1.Node, freeInit map[string]AvailableResources, resident map[string][]corev1.Pod, drainedNode string) Combination {
+	free := make(map[string]AvailableResources, len(freeInit))
+	for name, f := range freeInit {
+		free[name] = AvailableResources{CPU: f.CPU.DeepCopy(), Memory: f.Memory.DeepCopy()}
+	}
+	placed := make(map[string][]corev1.Pod, len(candidates))
+	plan := make(Combination, 0, len(ordered))
+
+	for i := range ordered {
+		pod := ordered[i]
+		req := podRequests(&pod)
+
+		// filter: what the scheduler's filter plugins would reject
+		admissible := make([]int, 0, len(candidates))
+		for ci := range candidates {
+			node := &candidates[ci]
+			avail := free[node.Name]
+			if req.CPU.Cmp(avail.CPU) > 0 || req.Memory.Cmp(avail.Memory) > 0 {
+				continue
+			}
+			if !toleratesTaints(&pod, node) || !matchesNodeAffinity(&pod, node) {
+				continue
+			}
+			if !checkAffinityOnNode(occupantsOf(node.Name, resident, placed), []corev1.Pod{pod}) {
+				continue
+			}
+			admissible = append(admissible, ci)
+		}
+		if len(admissible) == 0 {
+			klog.V(3).Infof("No admissible destination for pod %s/%s while draining node %s",
+				pod.Namespace, pod.Name, drainedNode)
+			return nil
+		}
+
+		// score: what the scheduler's score plugins would prefer
+		scores := schedulerScores(&pod, req, candidates, admissible, free, resident, placed)
+		best := 0
+		for k := range scores {
+			if scores[k] > scores[best] {
+				best = k
+			}
+		}
+		target := candidates[admissible[best]]
+
+		avail := free[target.Name]
+		cpu, mem := avail.CPU.DeepCopy(), avail.Memory.DeepCopy()
+		cpu.Sub(req.CPU)
+		mem.Sub(req.Memory)
+		free[target.Name] = AvailableResources{CPU: cpu, Memory: mem}
+		placed[target.Name] = append(placed[target.Name], pod)
+		plan = append(plan, Assignment{Pod: pod, Node: target})
+	}
+	return plan
+}
+
+// occupantsOf returns the pods on a candidate node: the ones already running there
+// plus the ones the plan has placed there so far.
+func occupantsOf(nodeName string, resident, placed map[string][]corev1.Pod) []corev1.Pod {
+	occupants := make([]corev1.Pod, 0, len(resident[nodeName])+len(placed[nodeName]))
+	occupants = append(occupants, resident[nodeName]...)
+	return append(occupants, placed[nodeName]...)
+}
+
+// Weights of the default kube-scheduler score plugins (KubeSchedulerConfiguration v1).
+const (
+	scoreWeightNodeAffinity       = 2.0
+	scoreWeightInterPodAffinity   = 2.0
+	scoreWeightLeastAllocated     = 1.0 // NodeResourcesFit, LeastAllocated strategy
+	scoreWeightBalancedAllocation = 1.0 // NodeResourcesBalancedAllocation
+	maxNodeScore                  = 100.0
+)
+
+// schedulerScores returns, for each admissible candidate (indexes into candidates), the
+// score the default kube-scheduler profile gives it for pod: every plugin scores all the
+// candidates, its scores are normalised to 0-100 across them, and the weighted sum
+// decides. Modelled: NodeAffinity (preferred terms, scaled so the best node gets 100),
+// InterPodAffinity (preferred affinity and anti-affinity in both directions, min-max
+// scaled), NodeResourcesFit with LeastAllocated, and NodeResourcesBalancedAllocation.
+// Not modelled: PodTopologySpread, TaintToleration (PreferNoSchedule), ImageLocality.
+func schedulerScores(pod *corev1.Pod, req AvailableResources, candidates []corev1.Node, admissible []int,
+	free map[string]AvailableResources, resident, placed map[string][]corev1.Pod) []float64 {
+
+	nodeAffinity := make([]float64, len(admissible))
+	podAffinity := make([]float64, len(admissible))
+	total := make([]float64, len(admissible))
+	for k, ci := range admissible {
+		node := &candidates[ci]
+		nodeAffinity[k] = float64(preferredNodeAffinityWeight(pod, node))
+		podAffinity[k] = float64(interPodAffinityScore(pod, node, candidates, resident, placed))
+		least, balanced := resourceScores(req, node, free[node.Name])
+		total[k] = scoreWeightLeastAllocated*least + scoreWeightBalancedAllocation*balanced
+	}
+	scaleToMax(nodeAffinity)
+	scaleMinMax(podAffinity)
+	for k := range total {
+		total[k] += scoreWeightNodeAffinity*nodeAffinity[k] + scoreWeightInterPodAffinity*podAffinity[k]
+	}
+	return total
+}
+
+// interPodAffinityScore is the InterPodAffinity score of pod on node before
+// normalisation. Like the scheduler it scores both directions: the weights of the pod's
+// preferred affinity terms matched by the pods in the node's topology domain, minus its
+// preferred anti-affinity terms, plus the affinity (minus the anti-affinity) terms of
+// those pods that the pod matches. Domains are built from the candidate nodes.
+func interPodAffinityScore(pod *corev1.Pod, node *corev1.Node, candidates []corev1.Node, resident, placed map[string][]corev1.Pod) int {
+	affinity, antiAffinity := preferredPodAffinityTerms(pod), preferredPodAntiAffinityTerms(pod)
+	score := 0
+	for i := range candidates {
+		other := &candidates[i]
+		occupants := occupantsOf(other.Name, resident, placed)
+		for j := range occupants {
+			occupant := &occupants[j]
+			score += matchedWeight(pod, occupant, affinity, node, other)
+			score -= matchedWeight(pod, occupant, antiAffinity, node, other)
+			score += matchedWeight(occupant, pod, preferredPodAffinityTerms(occupant), node, other)
+			score -= matchedWeight(occupant, pod, preferredPodAntiAffinityTerms(occupant), node, other)
+		}
+	}
+	return score
+}
+
+// matchedWeight sums the weights of owner's terms that target satisfies, counting only
+// the terms whose topology domain holds both nodes.
+func matchedWeight(owner, target *corev1.Pod, terms []corev1.WeightedPodAffinityTerm, a, b *corev1.Node) int {
+	total := 0
+	for i := range terms {
+		term := &terms[i].PodAffinityTerm
+		if sameTopologyDomain(a, b, term.TopologyKey) && podMatchesAffinityTerm(owner, target, term) {
+			total += int(terms[i].Weight)
+		}
+	}
+	return total
+}
+
+// sameTopologyDomain reports whether two nodes share the value of topologyKey.
+func sameTopologyDomain(a, b *corev1.Node, topologyKey string) bool {
+	if topologyKey == "" || topologyKey == "kubernetes.io/hostname" {
+		return a.Name == b.Name
+	}
+	va, okA := a.Labels[topologyKey]
+	vb, okB := b.Labels[topologyKey]
+	return okA && okB && va == vb
+}
+
+// resourceScores returns the LeastAllocated and BalancedAllocation scores (0-100) of
+// placing a pod with requests req on node, given what is still free there.
+func resourceScores(req AvailableResources, node *corev1.Node, free AvailableResources) (leastAllocated, balanced float64) {
+	cpuAllocatable := float64(node.Status.Allocatable.Cpu().MilliValue())
+	memAllocatable := float64(node.Status.Allocatable.Memory().Value())
+	if cpuAllocatable <= 0 || memAllocatable <= 0 {
+		return 0, 0
+	}
+	cpuFree := clamp01((float64(free.CPU.MilliValue()) - float64(req.CPU.MilliValue())) / cpuAllocatable)
+	memFree := clamp01((float64(free.Memory.Value()) - float64(req.Memory.Value())) / memAllocatable)
+	leastAllocated = (cpuFree + memFree) / 2 * maxNodeScore
+	// the used fractions differ by |cpuFree - memFree|; their standard deviation is half that
+	balanced = (1 - math.Abs(cpuFree-memFree)/2) * maxNodeScore
+	return leastAllocated, balanced
+}
+
+func clamp01(v float64) float64 {
+	return math.Max(0, math.Min(1, v))
+}
+
+// scaleToMax scales the scores so the highest becomes maxNodeScore (the scheduler's
+// DefaultNormalizeScore); all zero stays zero.
+func scaleToMax(scores []float64) {
+	highest := maxFloat64(scores)
+	if highest <= 0 {
+		return
+	}
+	for i := range scores {
+		scores[i] = scores[i] * maxNodeScore / highest
+	}
+}
+
+// scaleMinMax scales the scores to 0-maxNodeScore between their minimum and maximum
+// (InterPodAffinity's normalisation); when they are all equal they all become zero.
+func scaleMinMax(scores []float64) {
+	lowest, highest := minFloat64(scores), maxFloat64(scores)
+	for i := range scores {
+		if highest > lowest {
+			scores[i] = maxNodeScore * (scores[i] - lowest) / (highest - lowest)
+		} else {
+			scores[i] = 0
+		}
+	}
 }
 
 func podRequestsCPU(pod *corev1.Pod) *resource.Quantity {
@@ -127,6 +520,11 @@ func podRequestsMemory(pod *corev1.Pod) *resource.Quantity {
 	return &total
 }
 
+// Deprecated: CheckResources seeds each destination's budget from bare Allocatable and
+// never subtracts the pods already running there, so it only verifies that the moving
+// pods would fit on an empty node. BuildMigrationPlan supersedes it and accounts for
+// resident pods via NodeFreeResources. Retained only for the existing unit tests; do
+// not use it to decide whether a migration is feasible.
 func CheckResources(combinations []Combination) []Combination {
 	if combinations == nil {
 		return nil
@@ -417,7 +815,7 @@ func checkPodAffinityPair(a, b *corev1.Pod) bool {
 	// --- PodAffinity rules ---
 	if aff.PodAffinity != nil {
 		for _, term := range aff.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
-			if matchPodAffinityTerm(b, &term) {
+			if podMatchesAffinityTerm(a, b, &term) {
 				// ok, almeno un termine è soddisfatto
 				return true
 			} else {
@@ -430,7 +828,7 @@ func checkPodAffinityPair(a, b *corev1.Pod) bool {
 	// --- PodAntiAffinity rules ---
 	if aff.PodAntiAffinity != nil {
 		for _, term := range aff.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
-			if matchPodAffinityTerm(b, &term) {
+			if podMatchesAffinityTerm(b, a, &term) {
 				// anti-affinity violata
 				return false
 			}
@@ -730,13 +1128,26 @@ func ApplySoftConstraintsScaleUp(ctx context.Context, nodes corev1.NodeList, k8s
 	return rankedNodes, nil
 }
 
-func ApplySoftConstraints(validScheduling []Assignment, nodes []corev1.Node, ctx context.Context, client client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, string, error) {
+// ApplySoftConstraints ranks the candidate nodes for shutdown. plans maps a node name
+// to the migration plan that would evacuate that node, and every criterion for a node
+// is computed against that node's own plan.
+//
+// Previously a single plan was drawn at random from the pooled plans of all candidates
+// and used to score every node, so for node X the affinity and topology criteria
+// actually described a scenario that evacuated some other node, and the values changed
+// from one reconcile to the next for an unchanged cluster.
+func ApplySoftConstraints(plans map[string]Combination, nodes []corev1.Node, ctx context.Context, client client.Client, nodeSelecting clusterv1alpha1.NodeSelecting) ([]corev1.Node, string, error) {
 	klog.FromContext(ctx).WithName("Apply-TOPSIS-scale-down")
 	klog.V(2).Info("Applying soft constraints with TOPSIS")
 	// Fill the structure with criteria values
 	var criteriaList []TOPSISCriteria
 	var message = "Values for TOPSIS scale down evaluation: | "
 	for _, node := range nodes {
+		validScheduling, ok := plans[node.Name]
+		if !ok {
+			klog.V(2).Info("No migration plan recorded for node, skipping it", "node", node.Name)
+			continue
+		}
 
 		// get number of running pods
 		numPods, err := GetNumberOfRunningPods(node, ctx, client)
@@ -878,96 +1289,159 @@ func GetEnergyProfile(nodeManagedCluster corev1.Node, ctx context.Context, k8sCl
 	return energyProfile, nil
 }
 
-func GetPreferredNodeAffinity(node corev1.Node, validSchedulingConfig []Assignment) int {
+// ----- AFFINITY HELPERS -----
 
-	// reproduce the logic to count preferred node affinity weights used by kube-scheduler
-	// for each pod checks if it has preferred node affinity to the node
-	// if they match, sum the weight
+func podKey(pod *corev1.Pod) string {
+	return pod.Namespace + "/" + pod.Name
+}
 
-	totalWeight := 0
-	for _, assignment := range validSchedulingConfig {
-		klog.V(4).Infof("[DEBUG-AFFINITY] Evaluating preferred node affinity for Pod %s on Node %s", assignment.Pod.Name, node.Name)
-		pod := assignment.Pod
-		if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil {
-			continue
-		}
-
-		preferred := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
-		for _, term := range preferred {
-			klog.V(4).Infof("[DEBUG-AFFINITY] Checking NodeSelectorTerm: %+v against Node Labels: %+v", term.Preference, node.Labels)
-			if matchNodeSelectorTerm(term.Preference, node.Labels) {
-				totalWeight += int(term.Weight)
-			}
+// preferredNodeAffinityWeight returns the total weight of the pod's preferred node
+// affinity terms that the node satisfies.
+func preferredNodeAffinityWeight(pod *corev1.Pod, node *corev1.Node) int {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil {
+		return 0
+	}
+	total := 0
+	for _, term := range pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+		if matchNodeSelectorTerm(term.Preference, node.Labels) {
+			total += int(term.Weight)
 		}
 	}
-	return totalWeight
+	return total
+}
+
+func preferredPodAffinityTerms(pod *corev1.Pod) []corev1.WeightedPodAffinityTerm {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAffinity == nil {
+		return nil
+	}
+	return pod.Spec.Affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+}
+
+func preferredPodAntiAffinityTerms(pod *corev1.Pod) []corev1.WeightedPodAffinityTerm {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAntiAffinity == nil {
+		return nil
+	}
+	return pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+}
+
+// podMatchesAffinityTerm reports whether target is selected by term, which belongs to
+// owner. As in Kubernetes, a term without namespaces and without namespaceSelector only
+// selects pods in the owner's own namespace. namespaceSelector is approximated as
+// "any namespace" because namespace labels are not fetched here.
+func podMatchesAffinityTerm(owner, target *corev1.Pod, term *corev1.PodAffinityTerm) bool {
+	switch {
+	case term.NamespaceSelector != nil:
+		// approximation, see above
+	case len(term.Namespaces) > 0:
+		if !contains(term.Namespaces, target.Namespace) {
+			return false
+		}
+	default:
+		if target.Namespace != owner.Namespace {
+			return false
+		}
+	}
+	selector, err := metav1.LabelSelectorAsSelector(term.LabelSelector)
+	if err != nil {
+		return false
+	}
+	return selector.Matches(labels.Set(target.Labels))
+}
+
+// stillTogether reports whether two pods that share the drained node end up in the same
+// topology domain after the plan is applied. A pod that is not in the plan (DaemonSet,
+// monitoring, static) disappears with the node, so the pair is broken.
+func stillTogether(podA, podB *corev1.Pod, destination map[string]*corev1.Node, topologyKey string) bool {
+	destA, okA := destination[podKey(podA)]
+	destB, okB := destination[podKey(podB)]
+	if !okA || !okB {
+		return false
+	}
+	if topologyKey == "" || topologyKey == "kubernetes.io/hostname" {
+		return destA.Name == destB.Name
+	}
+	valA, hasA := destA.Labels[topologyKey]
+	valB, hasB := destB.Labels[topologyKey]
+	return hasA && hasB && valA == valB
+}
+
+func GetPreferredNodeAffinity(node corev1.Node, validSchedulingConfig []Assignment) int {
+	// Preferred node affinity LOST by draining this node: for every pod in the plan, the
+	// weight it gets here minus the weight it still gets on its destination. A pod moving
+	// to another node of its preferred group loses nothing. Destinations depend on the
+	// order the scheduler places the pods in, so the loss is the mean over the two orders
+	// the plan was built in (Node and AltNode).
+	lost := 0
+	for i := range validSchedulingConfig {
+		a := &validSchedulingConfig[i]
+		here := preferredNodeAffinityWeight(&a.Pod, &node)
+		lost += nodeAffinityLoss(here, preferredNodeAffinityWeight(&a.Pod, &a.Node))
+		lost += nodeAffinityLoss(here, preferredNodeAffinityWeight(&a.Pod, altNodeOf(a)))
+	}
+	return (lost + 1) / 2
+}
+
+func nodeAffinityLoss(here, there int) int {
+	if here > there {
+		return here - there
+	}
+	return 0
+}
+
+// altNodeOf is where the assignment's pod lands in the opposite placement order, or its
+// Node when that order had no feasible placement.
+func altNodeOf(a *Assignment) *corev1.Node {
+	if a.AltNode != nil {
+		return a.AltNode
+	}
+	return &a.Node
 }
 
 func GetPreferredInterPodAffinity(node corev1.Node, validSchedulingConfig []Assignment, managedClusterClient client.Client, ctx context.Context) (int, error) {
-	klog.V(4).Infof("[DEBUG-AFFINITY] === Starting evaluation for Node: %s ===", node.Name)
-	klog.V(4).Infof("[DEBUG-AFFINITY] Node %s Labels: %v", node.Name, node.Labels)
-	klog.V(4).Infof("[DEBUG-AFFINITY] Size of validSchedulingConfig received: %d", len(validSchedulingConfig))
-
-	// 1. Recuperiamo tutti i pod attualmente in esecuzione sul nodo sotto esame
+	// Preferred inter-pod affinity LOST by draining this node: the weight of every
+	// (pod -> preferred pod) pair that is satisfied on this node and is no longer in the
+	// same topology domain once the pods are moved away. The scheduler places the evicted
+	// pods in an order DREEM does not control, and for a pair evicted together the order
+	// decides whether it lands together, so every pair is scored in both orders the plan
+	// was built in (Node and AltNode): kept in both costs nothing, broken in both the full
+	// weight, broken in one of them half the weight - the loss to expect when either
+	// order is equally likely.
 	podsOnNode := corev1.PodList{}
-	err := managedClusterClient.List(ctx, &podsOnNode, client.MatchingFields{"spec.nodeName": node.Name})
-	if err != nil {
-		klog.V(4).ErrorS(err, "[DEBUG-AFFINITY] Failed to list pods on node %s", node.Name)
+	if err := managedClusterClient.List(ctx, &podsOnNode, client.MatchingFields{"spec.nodeName": node.Name}); err != nil {
 		return 0, err
 	}
-
-	// Filtriamo i pod di sistema (kube-proxy, calico, ecc.)
 	existingPods := filterSystemPods(podsOnNode.Items)
-	klog.V(4).Infof("[DEBUG-AFFINITY] Node %s has %d total pods, %d after filtering system pods", node.Name, len(podsOnNode.Items), len(existingPods))
 
-	totalWeight := 0
+	destination := make(map[string]*corev1.Node, len(validSchedulingConfig))
+	altDestination := make(map[string]*corev1.Node, len(validSchedulingConfig))
+	for i := range validSchedulingConfig {
+		a := &validSchedulingConfig[i]
+		destination[podKey(&a.Pod)] = &a.Node
+		altDestination[podKey(&a.Pod)] = altNodeOf(a)
+	}
 
-	// 2. VALUTAZIONE 1: Calcoliamo l'affinità interna attuale del nodo (Esistenti vs Esistenti)
-	klog.V(2).Infof("[DEBUG-AFFINITY] Evaluating internal affinity (Existing vs Existing) for %d pods...", len(existingPods))
-	for i := 0; i < len(existingPods); i++ {
-		for j := 0; j < len(existingPods); j++ {
+	lost := 0 // summed over both orders, halved at the end
+	for i := range existingPods {
+		for j := range existingPods {
 			if i == j {
 				continue
 			}
-			weight := computePodToPodAffinityWeight(&existingPods[i], &existingPods[j])
-			if weight > 0 {
-				klog.V(4).Infof("[DEBUG-AFFINITY] Match found! Existing Pod %s -> Existing Pod %s added weight: %d", existingPods[i].Name, existingPods[j].Name, weight)
-				totalWeight += weight
+			podA, podB := &existingPods[i], &existingPods[j]
+			for _, term := range preferredPodAffinityTerms(podA) {
+				if !podMatchesAffinityTerm(podA, podB, &term.PodAffinityTerm) {
+					continue
+				}
+				topologyKey := term.PodAffinityTerm.TopologyKey
+				if !stillTogether(podA, podB, destination, topologyKey) {
+					lost += int(term.Weight)
+				}
+				if !stillTogether(podA, podB, altDestination, topologyKey) {
+					lost += int(term.Weight)
+				}
 			}
 		}
 	}
-
-	// 3. VALUTAZIONE 2: Calcoliamo l'impatto con i pod della combinazione di scheduling corrente (Esistenti vs Nuovi)
-	klog.V(2).Infof("[DEBUG-AFFINITY] Evaluating scheduling config affinity (Existing vs New Incoming Pods)...")
-	for idx, assignment := range validSchedulingConfig {
-		// Logghiamo i dettagli di ogni assignment per capire cosa stiamo valutando
-		klog.V(4).Infof("[DEBUG-AFFINITY] Assignment [%d]: Pod %s is targeted to Node %s", idx, assignment.Pod.Name, assignment.Node.Name)
-
-		if assignment.Node.Name != node.Name {
-			klog.V(4).Infof("[DEBUG-AFFINITY] Assignment [%d] skipped: target node %s does not match current node %s", idx, assignment.Node.Name, node.Name)
-			continue
-		}
-
-		klog.V(4).Infof("[DEBUG-AFFINITY] Assignment [%d] matches node %s. Evaluating against %d existing pods...", idx, node.Name, len(existingPods))
-		for _, existingPod := range existingPods {
-			// Il pod esistente preferisce il nuovo?
-			w1 := computePodToPodAffinityWeight(&existingPod, &assignment.Pod)
-			if w1 > 0 {
-				klog.V(4).Infof("[DEBUG-AFFINITY] Match! Existing Pod %s -> New Pod %s added weight: %d", existingPod.Name, assignment.Pod.Name, w1)
-				totalWeight += w1
-			}
-
-			// Il nuovo pod preferisce quello esistente?
-			w2 := computePodToPodAffinityWeight(&assignment.Pod, &existingPod)
-			if w2 > 0 {
-				klog.V(4).Infof("[DEBUG-AFFINITY] Match! New Pod %s -> Existing Pod %s added weight: %d", assignment.Pod.Name, existingPod.Name, w2)
-				totalWeight += w2
-			}
-		}
-	}
-
-	klog.V(4).Infof("[DEBUG-AFFINITY] === Finished evaluation for Node: %s. Total Affinity Score: %d ===", node.Name, totalWeight)
-	return totalWeight, nil
+	return (lost + 1) / 2, nil
 }
 
 // Funzione ausiliaria per calcolare il peso dell'affinità preferita tra due Pod specifici con log interni
@@ -1012,57 +1486,44 @@ func computePodToPodAffinityWeight(podA, podB *corev1.Pod) int {
 	return weightSum
 }
 func GetPreferredInterPodAntiAffinity(node corev1.Node, validSchedulingConfig []Assignment, managedClusterClient client.Client, ctx context.Context) (int, error) {
-
-	// reproduce the logic to count preferred node affinity weights used by kube-scheduler
-	// for each pod checks if it has preferred pod affinity to the pods on the selected node
-	// if they match, sum the weight
-
-	// as first, get the pods scheduled on the seelected node
-	podsOnNode := corev1.PodList{}
-	err := managedClusterClient.List(ctx, &podsOnNode, client.MatchingFields{"spec.nodeName": node.Name})
-	if err != nil {
-		return 0, err
+	// Preferred anti-affinity VIOLATIONS CREATED by draining this node: for every pod the
+	// plan moves, the weight of its anti-affinity terms matched by the pods it will share
+	// its destination with (hostname topology). A pod never counts against itself.
+	// Cost criterion: fewer violations created = better node to remove.
+	incoming := make(map[string][]*corev1.Pod)
+	for i := range validSchedulingConfig {
+		a := &validSchedulingConfig[i]
+		incoming[a.Node.Name] = append(incoming[a.Node.Name], &a.Pod)
 	}
 
-	// check the affinity between the existing pods and the pods to schedule
-	totalWeight := 0
-	for _, assignment := range validSchedulingConfig {
-		pod := assignment.Pod
-		if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAntiAffinity == nil {
-			continue
+	created := 0
+	for destName, moving := range incoming {
+		residentList := corev1.PodList{}
+		if err := managedClusterClient.List(ctx, &residentList, client.MatchingFields{"spec.nodeName": destName}); err != nil {
+			return 0, err
 		}
+		residents := filterSystemPods(residentList.Items)
 
-		preferred := pod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
-		for _, term := range preferred {
-			selector, err := metav1.LabelSelectorAsSelector(term.PodAffinityTerm.LabelSelector)
-			if err != nil {
-				continue
-			}
+		neighbours := make([]*corev1.Pod, 0, len(residents)+len(moving))
+		for i := range residents {
+			neighbours = append(neighbours, &residents[i])
+		}
+		neighbours = append(neighbours, moving...)
 
-			// check against existing pods on the node
-			for _, existingPod := range podsOnNode.Items {
-				// check namespace
-				if len(term.PodAffinityTerm.Namespaces) > 0 {
-					found := false
-					for _, ns := range term.PodAffinityTerm.Namespaces {
-						if ns == existingPod.Namespace {
-							found = true
-							break
-						}
-					}
-					if !found {
+		for _, pod := range moving {
+			for _, term := range preferredPodAntiAffinityTerms(pod) {
+				for _, other := range neighbours {
+					if podKey(other) == podKey(pod) {
 						continue
 					}
-				}
-				if selector.Matches(labels.Set(existingPod.Labels)) {
-					totalWeight += int(term.Weight)
+					if podMatchesAffinityTerm(pod, other, &term.PodAffinityTerm) {
+						created += int(term.Weight)
+					}
 				}
 			}
 		}
 	}
-
-	return totalWeight, nil
-
+	return created, nil
 }
 
 func GetNumberOfRunningPods(node corev1.Node, ctx context.Context, k8sClient client.Client) (int, error) {
@@ -1258,7 +1719,7 @@ func ApplyTOPSISScaleUp(criteriaList []TOPSISCriteriaScaleUp, weights AHPweights
 	evalMatrix := MakeEvaluationMatrixScaleUp(criteriaList)
 	normalizedMatrix := NormalizeMatrix(evalMatrix)
 	weightedMatrix := WeightMatrixScaleUp(normalizedMatrix, weights)
-	idealSolution, negativeIdealSolution := CalculateIdealSolutions(weightedMatrix)
+	idealSolution, negativeIdealSolution := CalculateIdealSolutionsFor(weightedMatrix, benefitCriteriaScaleUp)
 	separationFromIdeal, separationFromNegativeIdeal := CalculateSeparationMeasures(weightedMatrix, idealSolution, negativeIdealSolution)
 	relativeCloseness := CalculateRelativeCloseness(separationFromIdeal, separationFromNegativeIdeal)
 
@@ -1313,7 +1774,7 @@ func MakeEvaluationMatrix(criteriaList []TOPSISCriteria) []map[string]float64 {
 			"PrefererredInterPodAffinity":   float64(crit.PrefererredInterPodAffinity),
 			"PreferredInterPodAntiAffinity": float64(crit.PreferredInterPodAntiAffinity),
 			"NumberOfRunningPods":           float64(crit.NumberOfRunningPods),
-			"TopologySpreadScore":           float64(crit.TopologySpreadScore),
+			criterionTopologySpread:         float64(crit.TopologySpreadScore),
 		}
 	}
 	return evalMatrix
@@ -1407,7 +1868,7 @@ func WeightMatrix(matrix []map[string]float64, weights AHPweights) []map[string]
 				weight = weights.PreferredInterPodAntiAffinity
 			case "NumberOfRunningPods":
 				weight = weights.NumberOfRunningPods
-			case "TopologySpread":
+			case criterionTopologySpread:
 				weight = weights.TopologySpread
 			default:
 				weight = 1.0
@@ -1420,15 +1881,31 @@ func WeightMatrix(matrix []map[string]float64, weights AHPweights) []map[string]
 
 }
 
+// EnergyProfile carries the WAP metric: the power the node draws for the workload
+// it runs, so a higher value always means a less efficient node. Its direction in
+// TOPSIS therefore depends on what we are ranking for:
+//
+//   - scale down, we rank candidates to switch OFF, so the least efficient node is
+//     the best pick and EnergyProfile is a benefit (maximize);
+//   - scale up, we rank candidates to switch ON, so the least efficient node is the
+//     worst pick and EnergyProfile is a cost (minimize).
+//
+// Every other criterion is a cost in both directions.
+var (
+	benefitCriteriaScaleDown = map[string]bool{"EnergyProfile": true}
+	benefitCriteriaScaleUp   = map[string]bool{}
+)
+
+// CalculateIdealSolutions determines the ideal and negative-ideal solutions for the
+// scale-down ranking. Use CalculateIdealSolutionsFor to rank in the other direction.
 func CalculateIdealSolutions(matrix []map[string]float64) (map[string]float64, map[string]float64) {
-	// Type of criteria:
-	// PowerCycle: cost
-	// EnergyProfile: benefit
-	// PreferredNodeAffinity: cost
-	// PrefererredInterPodAffinity: cost
-	// PreferredInterPodAntiAffinity: cost
-	// NumberOfRunningPods: cost
-	// TopologySpreadScore: cost
+	return CalculateIdealSolutionsFor(matrix, benefitCriteriaScaleDown)
+}
+
+// CalculateIdealSolutionsFor determines the ideal and negative-ideal solutions,
+// treating every criterion listed in benefitCriteria as a benefit (to maximize) and
+// all the others as costs (to minimize).
+func CalculateIdealSolutionsFor(matrix []map[string]float64, benefitCriteria map[string]bool) (map[string]float64, map[string]float64) {
 
 	numCriteria := len(matrix[0])
 	ideal := make(map[string]float64, numCriteria)
@@ -1447,11 +1924,10 @@ func CalculateIdealSolutions(matrix []map[string]float64) (map[string]float64, m
 		}
 
 		// determine ideal and negative-ideal based on criteria type
-		switch key {
-		case "EnergyProfile": // benefit
+		if benefitCriteria[key] {
 			ideal[key] = maxFloat64(values)
 			negativeIdeal[key] = minFloat64(values)
-		default: // cost
+		} else { // cost
 			ideal[key] = minFloat64(values)
 			negativeIdeal[key] = maxFloat64(values)
 		}
@@ -1566,62 +2042,47 @@ func SortMachineDeploymentsByCloseness(rankedNodes []RankedMachineDeployment) []
 	return sorted
 }
 
+// GetTopologySpreadScore measures how much a migration plan degrades topology spread:
+// the increase in skew the plan causes, summed over the distinct constraints of the
+// pods being moved. Higher is worse, so it is a cost criterion.
+//
+// Both soft (ScheduleAnyway) and hard (DoNotSchedule) constraints are scored. Hard
+// constraints stay a pure admission concern in CheckTopologySpreadConstraints, which
+// is unchanged and still rejects plans that would exceed MaxSkew; but among the plans
+// that are admissible, one that pushes the skew from 0 up to the limit is still worse
+// for the application than one that leaves the distribution untouched, and only the
+// score can express that difference.
 func GetTopologySpreadScore(ctx context.Context, r client.Client, comb Combination, currentNode corev1.Node) (int, error) {
-	score := 0
+	if len(comb) == 0 {
+		return 0, nil
+	}
 
-	// 1. Recuperiamo i nodi del cluster
 	var allNodes corev1.NodeList
 	if err := r.List(ctx, &allNodes); err != nil {
 		return 0, err
 	}
-
-	// 2. Recuperiamo i pod del cluster
 	var allPods corev1.PodList
 	if err := r.List(ctx, &allPods); err != nil {
 		return 0, err
 	}
 
-	// 3. Analizziamo i vincoli dei pod
+	score := 0
+	seen := make(map[string]bool)
+
 	for _, assignment := range comb {
-		pod := assignment.Pod
+		for _, constraint := range assignment.Pod.Spec.TopologySpreadConstraints {
+			// the same constraint shared by several pods of a deployment describes one
+			// distribution requirement, so it must only be counted once per plan
+			key := constraint.TopologyKey + "|" + metav1.FormatLabelSelector(constraint.LabelSelector)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 
-		if len(pod.Spec.TopologySpreadConstraints) == 0 {
-			continue
-		}
-
-		for _, constraint := range pod.Spec.TopologySpreadConstraints {
-			if constraint.WhenUnsatisfiable == corev1.ScheduleAnyway {
-
-				// Calcoliamo lo skew reale della combinazione di base
-				skew := calculateRealSkew(comb, allNodes.Items, allPods.Items, constraint)
-
-				// === DINAMICITÀ BASATA SUL NODO ===
-				// Se il nodo corrente appartiene allo stesso dominio topologico (es. stessa "zone")
-				// dell'assegnamento corrente, verifichiamo se l'aggiunta incrementa lo sbilanciamento.
-				topoKey := constraint.TopologyKey
-				if currentZone, ok := currentNode.Labels[topoKey]; ok {
-					if targetZone, exists := assignment.Node.Labels[topoKey]; exists && currentZone == targetZone {
-						// Questo nodo fa parte del dominio target: premiamo i nodi che mantengono
-						// o migliorano lo skew, penalizziamo quelli in domini già sovraccarichi.
-						if skew <= int(constraint.MaxSkew) {
-							score += 3 // Bonus maggiore se il nodo aiuta a rispettare il vincolo soft
-						} else {
-							score += 1 // Bonus minimo o nullo se il nodo si trova in una zona già satura
-						}
-						continue
-					}
-				}
-
-				// Comportamento di fallback standard se il nodo è in un altro dominio
-				if skew <= int(constraint.MaxSkew) {
-					score += 2
-				} else {
-					penalita := skew - int(constraint.MaxSkew)
-					punteggioParziale := 2 - penalita
-					if punteggioParziale > 0 {
-						score += punteggioParziale
-					}
-				}
+			before := calculateRealSkew(Combination{}, allNodes.Items, allPods.Items, constraint)
+			after := calculateRealSkew(comb, allNodes.Items, allPods.Items, constraint)
+			if degradation := after - before; degradation > 0 {
+				score += degradation
 			}
 		}
 	}

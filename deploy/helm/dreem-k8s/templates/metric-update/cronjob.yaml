@@ -1,0 +1,55 @@
+{{- if .Values.metricUpdate.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "dreem.fullname" . }}-metric-update
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dreem.componentLabels" (list . "metric-update") | nindent 4 }}
+spec:
+  schedule: {{ .Values.metricUpdate.schedule | quote }}
+  concurrencyPolicy: {{ .Values.metricUpdate.concurrencyPolicy }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "dreem.selectorLabels" (list . "metric-update") | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "dreem.metricUpdate.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.metricUpdate.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.metricUpdate.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.metricUpdate.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: update-consumption-profile
+              image: {{ include "dreem.image" .Values.metricUpdate.image }}
+              imagePullPolicy: {{ .Values.metricUpdate.image.pullPolicy }}
+              args:
+                - --prometheus-url
+                - {{ .Values.metricUpdate.prometheusUrl | default .Values.prometheus.url | quote }}
+                - --hours
+                - {{ .Values.metricUpdate.hours | quote }}
+                - --step
+                - {{ .Values.metricUpdate.step | quote }}
+                {{- with .Values.metricUpdate.extraArgs }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              {{- with .Values.metricUpdate.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}

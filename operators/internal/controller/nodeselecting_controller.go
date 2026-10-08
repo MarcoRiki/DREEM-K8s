@@ -18,8 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
-	"math/big"
 	"strings"
 
 	"github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
@@ -149,21 +147,10 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 	}
 	nodeListFiltered := corev1.NodeList{}
 	for _, node := range nodeList.Items {
-		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; isControlPlane {
+		if isControlPlaneNode(node) {
 			continue
 		}
-		if _, isMaster := node.Labels["node-role.kubernetes.io/master"]; isMaster {
-			continue
-		}
-
-		isReady := false
-		for _, condition := range node.Status.Conditions {
-			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
-				isReady = true
-				break
-			}
-		}
-		if isReady {
+		if isNodeReady(node) {
 			continue
 		}
 
@@ -188,48 +175,71 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 	return nil, "", selectedNode
 }
 
+// scaleDownCandidates returns the worker nodes that can take part in a scale-down: the
+// ones that are Ready and schedulable. They are both the nodes that may be switched off
+// and the destinations the evicted pods are planned onto.
+//
+// A cordoned node is still Ready, so the Ready check alone let it through: a node that
+// a previous NodeHandling is draining, or that an administrator has cordoned, would be
+// offered as a destination for pods the scheduler can never put there, and could be
+// selected for shutdown a second time.
+func scaleDownCandidates(nodes []corev1.Node) []corev1.Node {
+	candidates := make([]corev1.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if isControlPlaneNode(node) || !isNodeReady(node) {
+			continue
+		}
+		if node.Spec.Unschedulable {
+			klog.V(3).Info("Node is cordoned, left out of the scale-down", "node", node.Name)
+			continue
+		}
+		candidates = append(candidates, node)
+	}
+	return candidates
+}
+
+func isControlPlaneNode(node corev1.Node) bool {
+	if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
+		return true
+	}
+	_, ok := node.Labels["node-role.kubernetes.io/master"]
+	return ok
+}
+
+func isNodeReady(node corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) (error, string, string) {
 	klog.FromContext(ctx).WithName("can-scale-down")
 
 	selectedNode := ""
 
 	// get the list of available nodes in the cluster.
-	// Keep only worker nodes that are Ready, because they represent powered-on nodes.
+	// Keep only worker nodes that are Ready and schedulable, because they represent
+	// powered-on nodes the scheduler can use.
 	nodeList := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodeList); err != nil {
 		klog.V(2).ErrorS(err, "failed to list nodes")
 		return err, "", ""
 
 	}
-	nodeListFiltered := &corev1.NodeList{}
+	nodeList = &corev1.NodeList{Items: scaleDownCandidates(nodeList.Items)}
 	for _, node := range nodeList.Items {
-		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; isControlPlane {
-			continue
-		}
-		if _, isMaster := node.Labels["node-role.kubernetes.io/master"]; isMaster {
-			continue
-		}
-
-		isReady := false
-		for _, condition := range node.Status.Conditions {
-			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
-				isReady = true
-				break
-			}
-		}
-		if !isReady {
-			continue
-		}
-
-		nodeListFiltered.Items = append(nodeListFiltered.Items, node)
 		klog.V(3).Info("Node candidate for scale down:", "node", node.Name)
 	}
 
-	nodeList = nodeListFiltered
-	validNodeToShutdown := make([]corev1.Node, 0) // nodes that can be shutdown after hard-constraints check
-	valid := make([]Combination, 0)               // valid scheduling configurations
-	total_valid := make([]Combination, 0)
-	// for each node, check the pods that must be migrated
+	// For every candidate node build the single plan that would evacuate it, and keep
+	// that plan alongside the node. Each node is then scored against its own plan, so
+	// the soft criteria answer "what does the application lose if THIS node goes away".
+	validNodeToShutdown := make([]corev1.Node, 0) // nodes that survive the hard constraints
+	plans := make(map[string]Combination, len(nodeList.Items))
+
 	for _, node := range nodeList.Items {
 
 		klog.V(2).Info("Getting migratable pods for node", "node", node.Name)
@@ -239,89 +249,40 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 			continue
 		}
 		klog.V(2).Info("Got migratable pods", "node", node.Name, "count", len(podToScheduleList))
-		//fmt.Print("Pod to schedule list for node ", node.Name, ":\n")
-		// for _, p := range podToScheduleList {
-		// 	fmt.Print(" - ", p.Name, "\n")
-		// }
 
-		// take the candidates nodes excluding the current one
-		candidateNodes := &corev1.NodeList{}
+		// take the candidate destinations, excluding the node being drained
+		candidateNodes := make([]corev1.Node, 0, len(nodeList.Items))
 		for _, n := range nodeList.Items {
 			if n.Name != node.Name {
-				candidateNodes.Items = append(candidateNodes.Items, n)
+				candidateNodes = append(candidateNodes, n)
 			}
 		}
-		// fmt.Print("Candidates nodes for node ", node.Name, ":\n")
-		// for _, cn := range candidateNodes.Items {
-		// 	fmt.Print(" - ", cn.Name, "\n")
-		// }
-		// fmt.Print("\n")
-
-		numNodes := len(candidateNodes.Items)
-
-		if numNodes == 0 {
+		if len(candidateNodes) == 0 {
 			continue
 		}
 
-		// Generate all scheduling combinations
-		klog.V(2).Info("Generating combinations", "node", node.Name, "candidates", len(candidateNodes.Items))
-		combinations := GenerateCombinations(podToScheduleList, candidateNodes.Items, r.MaxNumberOfConfigurations)
-		klog.V(2).Info("Generated combinations", "node", node.Name, "count", len(combinations))
-
-		// check hard-constraints
-
-		valid = CheckResources(combinations)
-		klog.V(3).Info("Valid after resources check:", "count ", len(valid), " node ", node.Name)
-		valid = CheckNodeAffinity(valid)
-		klog.V(3).Info("Valid after node affinity check:", "count ", len(valid), " node ", node.Name)
-		valid = CheckTaints(valid)
-		klog.V(3).Info("Valid after taints check:", "count ", len(valid), " node ", node.Name)
-		klog.V(3).Info("Checking inter-pod affinity: ", "node", node.Name)
-		valid = CheckInterPodAffinity(ctx, r.Client, valid)
-		klog.V(3).Info("Valid after inter-pod affinity check: ", " count ", len(valid), " node ", node.Name)
-		valid = CheckTopologySpreadConstraints(ctx, r.Client, valid)
-		klog.V(3).Info("Valid after topology spread constraints check: ", " count ", len(valid), " node ", node.Name)
-		klog.V(3).Infof("Node %s: %d valid scheduling configurations found after hard-constraints check ", node.Name, len(valid))
-		if len(valid) == 0 {
-			klog.V(3).Info("No valid scheduling found for node ", " node ", node.Name)
+		plan, err := BuildMigrationPlan(ctx, r.Client, node, candidateNodes, podToScheduleList)
+		if err != nil {
+			klog.V(2).ErrorS(err, "Failed to build a migration plan for node", "node", node.Name)
 			continue
-		} else {
-			total_valid = append(total_valid, valid...)
 		}
-		// if at least one valid configuration is found, the node can be shutdown
-		klog.V(3).Info("Valid scheduling found for node ", " node ", node.Name)
+		if plan == nil {
+			klog.V(3).Info("No feasible migration plan, node cannot be drained", "node", node.Name)
+			continue
+		}
+
+		klog.V(3).Info("Migration plan built", "node", node.Name, "podsToMove", len(plan))
+		plans[node.Name] = plan
 		validNodeToShutdown = append(validNodeToShutdown, node)
 	}
-	// fmt.Printf("Total %d nodes can be shutdown after hard constraints check\n", len(validNodeToShutdown))
 
 	if len(validNodeToShutdown) == 0 {
 		klog.V(3).Info("No node can be shutdown after checking hard constraints")
 		return nil, "", selectedNode
 	}
 
-	// Check if there's at least one non-empty combination
-	hasNonEmptyCombination := false
-	for _, comb := range total_valid {
-		if len(comb) > 0 {
-			hasNonEmptyCombination = true
-			break
-		}
-	}
-	if !hasNonEmptyCombination {
-		klog.V(3).Info("All combinations are empty, no valid scheduling configuration found")
-		return nil, "", selectedNode
-	}
-
-	// select randomly one of the valid nodes to shutdown
-	index, _ := rand.Int(rand.Reader, big.NewInt(int64(len(total_valid))))
-
-	// check whether it is an empty combination. if so, choose another one
-	for len(total_valid[index.Int64()]) == 0 {
-		index, _ = rand.Int(rand.Reader, big.NewInt(int64(len(total_valid))))
-	}
-
-	klog.V(2).Info("Calling ApplySoftConstraints ", " numAssignments ", len(total_valid[index.Int64()]), " numNodes ", len(validNodeToShutdown))
-	rankedNodes, message, err := ApplySoftConstraints(total_valid[index.Int64()], validNodeToShutdown, ctx, r.Client, *nodeSelecting)
+	klog.V(2).Info("Calling ApplySoftConstraints ", " numPlans ", len(plans), " numNodes ", len(validNodeToShutdown))
+	rankedNodes, message, err := ApplySoftConstraints(plans, validNodeToShutdown, ctx, r.Client, *nodeSelecting)
 	klog.V(2).Info("ApplySoftConstraints returned ", " hasError ", err != nil, " numRankedNodes ", len(rankedNodes))
 	if err != nil {
 		klog.V(2).ErrorS(err, "Failed to apply soft constraints for node selection")

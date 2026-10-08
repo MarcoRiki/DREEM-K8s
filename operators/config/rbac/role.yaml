@@ -22,8 +22,15 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
 - apiGroups:
   - cluster.dreemk8s
   resources:

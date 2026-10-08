@@ -1,0 +1,20 @@
+DREEM has been installed in namespace {{ .Release.Namespace }}.
+
+Components:
+  - operator:      {{ include "dreem.fullname" . }}-operator
+{{- if .Values.forecast.enabled }}
+  - forecaster:    {{ include "dreem.fullname" . }}-forecast (Prometheus: {{ .Values.forecast.prometheusUrl | default .Values.prometheus.url }})
+{{- end }}
+{{- if .Values.metricUpdate.enabled }}
+  - metricUpdate:  {{ include "dreem.fullname" . }}-metric-update (schedule "{{ .Values.metricUpdate.schedule }}")
+{{- end }}
+
+Selection profile: {{ .Values.config.clusterConfiguration.selectionProfile }}, nodes {{ .Values.config.clusterConfiguration.minNodes }}-{{ .Values.config.clusterConfiguration.maxNodes }}
+
+Check the pods with:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+{{- if not .Values.config.bmcCredentials }}
+
+No BMC credentials were provided: create one Secret bmc-credentials-<node>
+per server in namespace {{ .Release.Namespace }}, or set config.bmcCredentials.
+{{- end }}

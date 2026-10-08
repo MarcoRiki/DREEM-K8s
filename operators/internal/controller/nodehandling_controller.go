@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -34,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -50,6 +52,10 @@ type NodeHandlingReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update
+
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
 
 func (r *NodeHandlingReconciler) handleInitialPhase(ctx context.Context, nodeHandling *clusterv1alpha1.NodeHandling) error {
 	klog.FromContext(ctx).WithName("handle-initial-phase")
@@ -188,14 +194,20 @@ func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32
 
 	// perform the power cycle action through Redfish API
 	endpoint := fmt.Sprintf(TEMPLATE_REDFISH_ENDPOINT, node_bmc_ip, string(credentialSecret.Data["id"]))
-	err := performPowerCycleAction(ctx, string(credentialSecret.Data["username"]), string(credentialSecret.Data["password"]), endpoint, "ON")
+	// drain first, so pods are rescheduled while the node is still up
+	// the node is off: nothing to drain, switch it on
+	// the node is off: nothing to drain, switch it on
+	if err := performPowerCycleAction(ctx, string(credentialSecret.Data["username"]), string(credentialSecret.Data["password"]), endpoint, "ON"); err != nil {
+		klog.V(2).ErrorS(err, "Power on failed", "node", selectedNode_string)
+		return err
+	}
 
 	klog.V(2).Info("Waiting for the node " + selectedNode_string + " to become Ready")
 	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 
 	pollInterval := 10 * time.Second
-	err = wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
 		node := &corev1.Node{}
 		if err := r.Get(ctx, client.ObjectKey{Name: selectedNode_string}, node); err != nil {
 			return false, err
@@ -216,6 +228,11 @@ func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32
 		return err
 	}
 
+	if err := r.uncordon(ctx, selectedNode_string); err != nil {
+		klog.V(2).ErrorS(err, "Failed to uncordon node after power on", "node", selectedNode_string)
+		return err
+	}
+
 	// update the DREEM_POWER_CYCLE_ANNOTATION annotation of the node to keep track of how many times the node has been power cycled
 	node := &corev1.Node{}
 	if err := r.Get(ctx, client.ObjectKey{Name: selectedNode_string}, node); err != nil {
@@ -228,12 +245,14 @@ func (r *NodeHandlingReconciler) scaleUp(ctx context.Context, scalingLabel int32
 		fmt.Sscanf(val, "%d", &powerCycleCount)
 	}
 	powerCycleCount++
+
+	patch := client.MergeFrom(node.DeepCopy())
 	if node.Annotations == nil {
 		node.Annotations = make(map[string]string)
 	}
 	node.Annotations[DREEM_POWER_CYCLE_ANNOTATION] = fmt.Sprintf("%d", powerCycleCount)
+	if err := r.Patch(ctx, node, patch); err != nil {
 
-	if err := r.Update(ctx, node); err != nil {
 		klog.V(2).ErrorS(err, "Failed to update node "+selectedNode_string+" with new power cycle count annotation")
 		return err
 	}
@@ -282,7 +301,7 @@ func performPowerCycleAction(ctx context.Context, username string, password stri
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("Redfish API returned non-success status code: %d", resp.StatusCode)
 	}
 
@@ -303,14 +322,29 @@ func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode_str
 	node_bmc_ip := string(credentialSecret.Data["bmc_address"])
 	endpoint := fmt.Sprintf(TEMPLATE_REDFISH_ENDPOINT, node_bmc_ip, string(credentialSecret.Data["id"]))
 	// perform the power cycle action through Redfish API
-	err := performPowerCycleAction(ctx, string(credentialSecret.Data["username"]), string(credentialSecret.Data["password"]), endpoint, "OFF")
+	// refuse if the pods on the node would be left Pending
+
+	// drain first, so pods are rescheduled while the node is still up
+	if err := r.cordonAndDrain(ctx, selectedNode_string, 10*time.Minute); err != nil {
+		klog.V(2).ErrorS(err, "Drain failed, aborting scale down", "node", selectedNode_string)
+		if uerr := r.uncordon(ctx, selectedNode_string); uerr != nil {
+			klog.V(2).ErrorS(uerr, "Failed to uncordon node after aborted drain", "node", selectedNode_string)
+		}
+		return err
+	}
+	if err := performPowerCycleAction(ctx, string(credentialSecret.Data["username"]), string(credentialSecret.Data["password"]), endpoint, "OFF"); err != nil {
+		klog.V(2).ErrorS(err, "Power off failed, uncordoning", "node", selectedNode_string)
+		_ = r.uncordon(ctx, selectedNode_string)
+		return err
+	}
+	// the node stays cordoned while off; scaleUp uncordons it once Ready
 
 	klog.V(2).Info("Waiting for the node " + selectedNode_string + " to shutdown and become NotReady")
 	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 
 	pollInterval := 10 * time.Second
-	err = wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextCancel(waitCtx, pollInterval, true, func(ctx context.Context) (bool, error) {
 		node := &corev1.Node{}
 		if err := r.Get(ctx, client.ObjectKey{Name: selectedNode_string}, node); err != nil {
 			return false, err
@@ -333,4 +367,69 @@ func (r *NodeHandlingReconciler) scaleDown(ctx context.Context, selectedNode_str
 
 	return nil
 
+}
+
+// cordonAndDrain marks the node unschedulable and evicts every pod that would not
+// survive the shutdown, through the Eviction API so that PodDisruptionBudgets and
+// terminationGracePeriodSeconds are honoured. It returns once only DaemonSet and
+// static pods are left on the node, or an error after timeout.
+func (r *NodeHandlingReconciler) cordonAndDrain(ctx context.Context, nodeName string, timeout time.Duration) error {
+	node := &corev1.Node{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		return err
+	}
+	if !node.Spec.Unschedulable {
+		patch := client.MergeFrom(node.DeepCopy())
+		node.Spec.Unschedulable = true
+		if err := r.Patch(ctx, node, patch); err != nil {
+			return fmt.Errorf("cordoning node %s: %w", nodeName, err)
+		}
+	}
+	klog.V(2).Info("Node cordoned, evicting pods", "node", nodeName)
+
+	return wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		pods := &corev1.PodList{}
+		if err := r.List(ctx, pods, client.MatchingFields{"spec.nodeName": nodeName}); err != nil {
+			return false, err
+		}
+		remaining := 0
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if isDaemonSetPod(*pod) || isStaticPod(*pod) ||
+				pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			remaining++
+			if pod.DeletionTimestamp != nil {
+				continue // already terminating
+			}
+			eviction := &policyv1.Eviction{ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace}}
+			if err := r.SubResource("eviction").Create(ctx, pod, eviction); err != nil {
+				switch {
+				case apierrors.IsNotFound(err):
+					// gone in the meantime
+				case apierrors.IsTooManyRequests(err):
+					klog.V(3).Info("Eviction blocked by a PodDisruptionBudget, retrying", "pod", pod.Namespace+"/"+pod.Name)
+				default:
+					return false, fmt.Errorf("evicting %s/%s: %w", pod.Namespace, pod.Name, err)
+				}
+			}
+		}
+		klog.V(3).Info("Waiting for pods to leave node", "node", nodeName, "remaining", remaining)
+		return remaining == 0, nil
+	})
+}
+
+// uncordon makes the node schedulable again.
+func (r *NodeHandlingReconciler) uncordon(ctx context.Context, nodeName string) error {
+	node := &corev1.Node{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		return err
+	}
+	if !node.Spec.Unschedulable {
+		return nil
+	}
+	patch := client.MergeFrom(node.DeepCopy())
+	node.Spec.Unschedulable = false
+	return r.Patch(ctx, node, patch)
 }

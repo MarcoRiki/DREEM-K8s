@@ -1,319 +1,352 @@
-# script to update the dreemk8s.io/consumption-profile metric on the MachineDeployment
-# access prometheus api to get the latest power consumption and CPU usage and update the metric accordingly
-import datetime
-from prometheus_api_client import PrometheusConnect
-import collections
-import pandas as pd
-import numpy as np
+# Computes the dreemk8s.io/consumption-profile annotation of each worker node as its
+# Weighted Average Power (WAP), following Malla & Christensen (IPCCC 2018), Eq. (12):
+#
+#     WAP_i(t) = sum_u f_t(u) * P_i(u)
+#
+#   f_i(u)  utilization distribution that the CURRENT cluster workload would induce on
+#           node i: at each instant, the demand of the active workers (in cores) is
+#           averaged per active node and divided by the capacity of node i, i.e. the
+#           average utilization of a cluster made of copies of node i (the paper's
+#           "distribution of average utilization"). All nodes are evaluated against the
+#           same workload, so WAP differences reflect the hardware only. With equal
+#           capacities, f_i(u) is the distribution of the average utilization.
+#   P_i(u)  power-utilization curve of node i, estimated from its own CPU and iDRAC
+#           power telemetry. Per-level averages and the node capacity are persisted
+#           across runs in a ConfigMap, so that levels observed in earlier windows are
+#           not lost and powered-off nodes can still be scored.
+#
+# The same ConfigMap keeps, for logging only, the last WAP values computed for each node
+# (wap_history); they are never read back into the computation.
 import argparse
-from kubernetes import client, config
+import datetime
+import json
+import math
 
+import numpy as np
+import pandas as pd
+from kubernetes import client, config
+from prometheus_api_client import PrometheusConnect
+
+# iDRAC node_name -> node IP (as exposed by node_exporter)
 mapping_ip = {
     "restart-srv05": "192.168.17.85",
     "restart-srv10": "192.168.17.90",
 }
-
-# Inversione del dizionario per mappare gli IP di Prometheus ai nomi iDRAC
+# node IP -> Kubernetes node name
 mapping_ip_to_node = {v: k for k, v in mapping_ip.items()}
 
 control_plane_ips = ["192.168.11.65"]
 
+ANNOTATION_KEY = "dreemk8s.io/consumption-profile"
+LEVELS = np.arange(0, 101)  # discrete utilization levels, in percent
 
-def get_cpu_usage(prom_client, hours, step): 
-    # DF structure: timestamp index, columns are node names (IPs), values are CPU usage percentages (0-100 int)
-    query = f'1 - avg by (instance) (rate(node_cpu_seconds_total{{mode="idle", instance!~"{("|").join(control_plane_ips)}.*" }}[5m]))'
+
+# --------------------------------------------------------------------------- #
+# Telemetry                                                                    #
+# --------------------------------------------------------------------------- #
+
+def to_level(percent):
+    """Utilization in percent -> discrete level floor(u), clipped to [0, 100]."""
+    return int(min(100, max(0, math.floor(percent + 1e-9))))
+
+
+def query_range(prom_client, query, hours, step):
     end_time = datetime.datetime.now()
     start_time = end_time - datetime.timedelta(hours=hours)
-    result = prom_client.custom_query_range(
-        query=query,
-        start_time=start_time,
-        end_time=end_time,
-        step=f"{step}s"
-    )
-    cpu_usage = pd.DataFrame()
-    for node_data in result:
-        instance = node_data['metric']['instance'].split(':')[0]  
-        values = node_data['values']  # list of [timestamp, value]
-        timestamps = [datetime.datetime.fromtimestamp(float(v[0])) for v in values]
-        usage_values = [int(float(v[1]) * 100) for v in values]  # convert to percentage (0-100)
-        node_series = pd.Series(data=usage_values, index=timestamps, name=instance)
-        cpu_usage = pd.concat([cpu_usage, node_series], axis=1)
-
-    return cpu_usage
-
-def get_power_consumption(prom_client, consumption_metric, hours, step):
-    end_time = datetime.datetime.now()
-    start_time = end_time - datetime.timedelta(hours=hours)
-    query = f'{consumption_metric}'
-    result = prom_client.custom_query_range(
-        query=query,
-        start_time=start_time,
-        end_time=end_time,
-        step=f"{step}s"
+    return prom_client.custom_query_range(
+        query=query, start_time=start_time, end_time=end_time, step=f"{step}s"
     )
 
-    power_consumption = pd.DataFrame()
+
+def series_to_frame(result, column_of, scale=1.0):
+    """Prometheus range result -> DataFrame (timestamp index, one column per node)."""
+    columns = {}
     for node_data in result:
-        node_name = mapping_ip.get(node_data['metric']['node_name'])
-        if not node_name:
+        column = column_of(node_data["metric"])
+        if not column:
             continue
-        values = node_data['values']  # list of [timestamp, value]
-        timestamps = [datetime.datetime.fromtimestamp(float(v[0])) for v in values]
-        consumption_values = [int(float(v[1])) for v in values]  # power consumption in watts
-        node_series = pd.Series(data=consumption_values, index=timestamps, name=node_name)
-        power_consumption = pd.concat([power_consumption, node_series], axis=1)
-    
-    return power_consumption
+        timestamps = [datetime.datetime.fromtimestamp(float(v[0])) for v in node_data["values"]]
+        values = [float(v[1]) * scale for v in node_data["values"]]
+        columns[column] = pd.Series(values, index=pd.to_datetime(timestamps))
+    if not columns:
+        return pd.DataFrame()
+    return pd.DataFrame(columns).sort_index()
 
-def get_workload_distribution(utilization_series):
-    cleaned_utilization = utilization_series.dropna()
-    n = len(cleaned_utilization)
-    if n == 0:
-        return {}
 
-    # Conta le frequenze di ogni valore intero 0-100
-    counts = collections.Counter(cleaned_utilization.astype(int))
+def get_cpu_usage(prom_client, hours, step):
+    """CPU utilization in percent (0-100, float) of each worker node; columns are node IPs.
+    Each sample is 1 - idle rate over the previous 5 minutes, averaged over the node's cores.
+    A node that is powered off has no samples (NaN) at those instants."""
+    excluded = "|".join(control_plane_ips)
+    query = (
+        '1 - avg by (instance) (rate(node_cpu_seconds_total'
+        f'{{mode="idle", instance!~"{excluded}.*"}}[5m]))'
+    )
+    result = query_range(prom_client, query, hours, step)
+    return series_to_frame(result, lambda m: m["instance"].split(":")[0], scale=100.0)
 
-    # Genera f(u) come dizionario {utilizzazione_intera_0_100: probabilità}
-    sorted_items = sorted(counts.items(), key=lambda x: x[0])
-    f_u = {int(u): count / n for u, count in sorted_items}
 
-    return f_u
+def get_power_consumption(prom_client, power_query, hours, step):
+    """Power in watts reported by each node's BMC; columns are node IPs."""
+    result = query_range(prom_client, power_query, hours, step)
+    return series_to_frame(result, lambda m: mapping_ip.get(m.get("node_name")))
 
-def isotonic_regression(values):
-    # Pool Adjacent Violators Algorithm per ottenere una sequenza non decrescente
-    fitted_values = []
-    block_weights = []
-
-    for value in values:
-        fitted_values.append(float(value))
-        block_weights.append(1.0)
-
-        while len(fitted_values) >= 2 and fitted_values[-2] > fitted_values[-1]:
-            total_weight = block_weights[-2] + block_weights[-1]
-            averaged_value = (
-                fitted_values[-2] * block_weights[-2]
-                + fitted_values[-1] * block_weights[-1]
-            ) / total_weight
-
-            fitted_values[-2] = averaged_value
-            block_weights[-2] = total_weight
-            fitted_values.pop()
-            block_weights.pop()
-
-    expanded_values = []
-    for value, weight in zip(fitted_values, block_weights):
-        expanded_values.extend([value] * int(weight))
-
-    return np.array(expanded_values)
 
 def get_cpu_cores_per_node(prom_client):
-    query = 'count(node_cpu_seconds_total{mode="idle", instance!~"' + ('|').join(control_plane_ips) + '.*"}) by (instance)'
-    result = prom_client.custom_query(query)
-    cpu_cores = {}
-    for node_data in result:
-        instance = node_data['metric']['instance'].split(':')[0]
-        cpu_cores[instance] = int(float(node_data['value'][1]))
-    return cpu_cores   
+    """Number of logical CPUs of each worker node currently exporting metrics."""
+    excluded = "|".join(control_plane_ips)
+    query = f'count(node_cpu_seconds_total{{mode="idle", instance!~"{excluded}.*"}}) by (instance)'
+    cores = {}
+    for node_data in prom_client.custom_query(query):
+        instance = node_data["metric"]["instance"].split(":")[0]
+        cores[instance] = int(float(node_data["value"][1]))
+    return cores
 
-def map_cpu_to_power(cpu_usage, total_power, interpolate_missing=False):
-    cpu_usage.index = pd.to_datetime(cpu_usage.index)
-    total_power.index = pd.to_datetime(total_power.index)
 
-    cpu_usage = cpu_usage.sort_index()
-    total_power = total_power.sort_index()
+# --------------------------------------------------------------------------- #
+# Workload distribution f_t(u)                                                 #
+# --------------------------------------------------------------------------- #
 
-    power_mapping = {}
+def get_demand_per_active_node(cpu_usage, capacities):
+    """Average demand per active worker at each instant, in capacity units (cores):
+    d(t) = (1/|A(t)|) * sum_{j in A(t)} c_j * u_j(t). Nodes without samples at an
+    instant (e.g. powered off) are not part of A(t)."""
+    known = [n for n in cpu_usage.columns if n in capacities]
+    missing = set(cpu_usage.columns) - set(known)
+    if missing:
+        print(f"WARNING: no capacity known for {sorted(missing)}; excluded from the workload")
+    busy = cpu_usage[known] / 100.0 * pd.Series({n: capacities[n] for n in known})
+    return (busy.sum(axis=1, min_count=1) / busy.notna().sum(axis=1)).dropna()
 
-    for node_cpu in cpu_usage.columns:
-        # Allinea i nomi delle colonne usando la mappatura IP se differiscono
-        node_power = node_cpu
-        if node_cpu not in total_power.columns:
-            # Prova a convertire l'host/IP nel formato iDRAC node_name
-            node_power = mapping_ip_to_node.get(node_cpu)
-            
-        if not node_power or node_power not in total_power.columns:
+
+def get_induced_utilization(demand, capacity):
+    """Utilization (percent) that the demand per active node would induce on a node of the
+    given capacity, i.e. the average utilization of a cluster made of copies of that node."""
+    return (100.0 * demand / capacity).clip(upper=100.0)
+
+
+def get_workload_distribution(utilization):
+    """Empirical PMF of a utilization series: {level: fraction of instants at that level}."""
+    levels = utilization.dropna().map(to_level)
+    if levels.empty:
+        return {}
+    freq = levels.value_counts(normalize=True).sort_index()
+    return {int(u): float(p) for u, p in freq.items()}
+
+
+# --------------------------------------------------------------------------- #
+# Power-utilization curve P_i(u)                                               #
+# --------------------------------------------------------------------------- #
+
+def get_power_per_level(cpu_usage, power, tolerance="1min"):
+    """For each node, the average measured power at each utilization level it visited
+    in the current window. CPU and power samples are paired by nearest timestamp;
+    CPU samples without a power sample within `tolerance` are discarded."""
+    per_level = {}
+    for node in cpu_usage.columns:
+        if node not in power.columns:
             continue
-
-        df_cpu = cpu_usage[[node_cpu]].dropna()
-        df_power = total_power[[node_power]].dropna()
-
-        # Allineamento temporale nearest entro 1 minuto
+        df_cpu = cpu_usage[[node]].dropna().rename(columns={node: "cpu"})
+        df_power = power[[node]].dropna().rename(columns={node: "power"})
+        if df_cpu.empty or df_power.empty:
+            continue
         merged = pd.merge_asof(
-            df_cpu,
-            df_power,
-            left_index=True,
-            right_index=True,
-            suffixes=('_cpu', '_power'),
-            direction='nearest',
-            tolerance=pd.Timedelta("1m"),
-        )
-
-        # Interpolazione temporale dei Watt mancanti
-        merged["_power"] = merged[f"{node_power}_power"].interpolate(method="time")
-        merged["_cpu"] = merged[f"{node_cpu}_cpu"]
-
-        merged = merged.dropna(subset=["_cpu", "_power"])
-
-        mapping = {}
-        for cpu_value, power_value in zip(merged["_cpu"], merged["_power"]):
-            cpu_percent = int(round(cpu_value))
-            cpu_percent = max(0, min(100, cpu_percent))
-
-            if cpu_percent not in mapping:
-                mapping[cpu_percent] = []
-            mapping[cpu_percent].append(int(power_value))
-
-        node_mapping = {
-            cpu_percent: int(np.mean(power_values))
-            for cpu_percent, power_values in mapping.items()
-        }
-
-        if not node_mapping:
+            df_cpu, df_power,
+            left_index=True, right_index=True,
+            direction="nearest", tolerance=pd.Timedelta(tolerance),
+        ).dropna(subset=["power"])
+        if merged.empty:
             continue
-
-        if interpolate_missing:
-            sorted_node_mapping = dict(sorted(node_mapping.items()))
-            adjusted_values = isotonic_regression(list(sorted_node_mapping.values()))
-            monotone_series = pd.Series(adjusted_values, index=sorted_node_mapping.keys())
-            
-            # Reindex su tutti gli interi possibili da 0 a 100
-            full_index = range(0, 101)
-            s_interpolated = monotone_series.reindex(full_index).interpolate(method="linear", limit_direction="both")
-
-            power_mapping[node_cpu] = {
-                int(cpu): int(round(power)) for cpu, power in s_interpolated.items()
-            }
-        else:
-            power_mapping[node_cpu] = {
-                int(cpu): node_mapping[cpu] for cpu in sorted(node_mapping.keys())
-            }
-
-    return power_mapping
+        merged["level"] = merged["cpu"].map(to_level)
+        means = merged.groupby("level")["power"].mean()
+        per_level[node] = {int(u): float(p) for u, p in means.items()}
+    return per_level
 
 
-def calculate_node_wap(node_distributions, mapping_power):
-    wap = {}
-    for node, distribution in node_distributions.items():
-        if node not in mapping_power:
-            continue
-            
-        total_wap = 0.0
-        # Itera direttamente sulla distribuzione reale f(u) osservata
-        for u_int, f_u in distribution.items():
-            # Cerca la potenza corrispondente. Se manca il punto esatto, 
-            # usa il valore di fallback del punto più vicino o 0
-            p_u = mapping_power[node].get(u_int)
-            
-            if p_u is None:
-                # Fallback di sicurezza se l'interpolazione 0-100 è disattivata
-                available_keys = list(mapping_power[node].keys())
-                if available_keys:
-                    closest_key = min(available_keys, key=lambda x: abs(x - u_int))
-                    p_u = mapping_power[node][closest_key]
-                else:
-                    p_u = 0
-            
-            # WAP parziale = f(u) * P(u)
-            total_wap += f_u * p_u
-            
-        wap[node] = total_wap.__round__(3)  # Arrotonda a 3 decimali
-    return wap
+def merge_power_levels(stored, current):
+    """Per-level averages from the current window replace the stored ones; levels not
+    visited in the current window keep the value from the last window that observed them."""
+    merged = {node: dict(levels) for node, levels in stored.items()}
+    for node, levels in current.items():
+        merged.setdefault(node, {}).update(levels)
+    return merged
 
-def update_create_consumption_profile_metric(wap):
-    # prendi la risorsa Node corrispondente e aggiorna o crea la metrica custom dreemk8s.io/consumption-profile con il valore di WAP calcolato
-    # wap: {node ip: wap_value}
-    config.load_incluster_config()  # Carica la configurazione del cluster quando eseguito all'interno di Kubernetes
-    v1 = client.CoreV1Api()
-    for node_ip, wap_value in wap.items():
+
+def isotonic_regression(values):
+    """Pool Adjacent Violators: least-squares non-decreasing fit (equal weights)."""
+    fitted, weights = [], []
+    for value in values:
+        fitted.append(float(value))
+        weights.append(1)
+        while len(fitted) >= 2 and fitted[-2] > fitted[-1]:
+            total = weights[-2] + weights[-1]
+            fitted[-2] = (fitted[-2] * weights[-2] + fitted[-1] * weights[-1]) / total
+            weights[-2] = total
+            fitted.pop()
+            weights.pop()
+    expanded = []
+    for value, weight in zip(fitted, weights):
+        expanded.extend([value] * weight)
+    return np.array(expanded)
+
+
+def build_power_curve(level_means):
+    """Isotonic regression of the per-level averages, then linear interpolation over all
+    levels 0-100. Outside the observed range the curve is held at the nearest observed value."""
+    xs = sorted(level_means)
+    ys = isotonic_regression([level_means[u] for u in xs])
+    return dict(zip(LEVELS.tolist(), np.interp(LEVELS, xs, ys).tolist()))
+
+
+# --------------------------------------------------------------------------- #
+# WAP                                                                          #
+# --------------------------------------------------------------------------- #
+
+def calculate_wap(distributions, curves):
+    """WAP_i = sum_u f_i(u) * P_i(u), in watts."""
+    return {
+        node: round(sum(p_u * curves[node][u] for u, p_u in distribution.items()), 3)
+        for node, distribution in distributions.items()
+        if node in curves and distribution
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Kubernetes                                                                   #
+# --------------------------------------------------------------------------- #
+
+def load_node_profiles(v1, namespace, name):
+    """Stored per-node capacity, per-level average power and WAP log:
+    ({node: c}, {node: {level: W}}, {node: [{"time": ..., "wap": W}, ...]})."""
+    try:
+        cm = v1.read_namespaced_config_map(name, namespace)
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            return {}, {}, {}
+        raise
+    capacities, levels, history = {}, {}, {}
+    for node, payload in (cm.data or {}).items():
+        entry = json.loads(payload)
+        if entry.get("capacity") is not None:
+            capacities[node] = float(entry["capacity"])
+        node_levels = {int(u): float(p) for u, p in entry.get("levels", {}).items()}
+        if node_levels:
+            levels[node] = node_levels
+        if entry.get("wap_history"):
+            history[node] = entry["wap_history"]
+    return capacities, levels, history
+
+
+def append_wap_history(history, wap, max_entries):
+    """Appends the WAP of this run to each node's log, keeping the newest max_entries."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    merged = {node: list(entries) for node, entries in history.items()}
+    for node, value in wap.items():
+        merged.setdefault(node, []).append({"time": now, "wap": value})
+    return {node: entries[-max_entries:] for node, entries in merged.items() if max_entries > 0}
+
+
+def save_node_profiles(v1, namespace, name, capacities, levels, history):
+    data = {
+        node: json.dumps({
+            "capacity": capacities.get(node),
+            "levels": {str(u): round(p, 2) for u, p in sorted(levels.get(node, {}).items())},
+            "wap_history": history.get(node, []),
+        })
+        for node in sorted(set(capacities) | set(levels) | set(history))
+    }
+    body = client.V1ConfigMap(metadata=client.V1ObjectMeta(name=name, namespace=namespace), data=data)
+    try:
+        v1.replace_namespaced_config_map(name, namespace, body)
+    except client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+        v1.create_namespaced_config_map(namespace, body)
+
+
+def update_consumption_profile(v1, wap):
+    for node_ip, value in wap.items():
         node_name = mapping_ip_to_node.get(node_ip)
         if not node_name:
             continue
-        
-        # Recupera il nodo
+        body = {"metadata": {"annotations": {ANNOTATION_KEY: str(value)}}}
         try:
-            node = v1.read_node(node_name)
-        except client.exceptions.ApiException as e:
-            print(f"Error fetching node {node_name}: {e}")
-            continue
-
-        # Aggiorna o crea la metrica custom
-        if node.metadata.annotations is None:
-            node.metadata.annotations = {}
-        
-        annotation_key = "dreemk8s.io/consumption-profile"
-        node.metadata.annotations[annotation_key] = str(wap_value)
-
-        try:
-            v1.patch_node(node_name, node)
-            print(f"Updated {annotation_key} for node {node_name} with value {wap_value}")
+            v1.patch_node(node_name, body)
+            print(f"Updated {ANNOTATION_KEY} for node {node_name}: {value}")
         except client.exceptions.ApiException as e:
             print(f"Error updating node {node_name}: {e}")
 
 
+# --------------------------------------------------------------------------- #
+# Main                                                                         #
+# --------------------------------------------------------------------------- #
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prometheus-url", default="http://localhost:9090")
-    parser.add_argument("--hours", type=int, default=24, help="Number of hours to consider for metrics")
-    parser.add_argument("--step", type=int, default=30, help="Step in seconds for Prometheus queries")
+    parser.add_argument("--hours", type=int, default=24, help="Observation window T, in hours")
+    parser.add_argument("--step", type=int, default=30, help="Sampling period, in seconds")
+    parser.add_argument("--power-query", default="sum(idrac_power_supply_output_watts) by (node_name)")
+    parser.add_argument("--capacities", default=None,
+                        help='JSON {"node IP": capacity} overriding the core count, e.g. with a '
+                             'per-node performance score when per-core speed differs')
+    parser.add_argument("--curves-namespace", default="default", help="Namespace of the node-profile ConfigMap")
+    parser.add_argument("--curves-configmap", default="dreem-power-curves")
+    parser.add_argument("--wap-history", type=int, default=100,
+                        help="WAP values kept per node in the ConfigMap, for logging only")
+    parser.add_argument("--dry-run", action="store_true", help="Compute and print only; no Kubernetes access")
     args = parser.parse_args()
 
-    prometheus = PrometheusConnect(
-        url=args.prometheus_url,
-        disable_ssl=True,
-    )
+    prometheus = PrometheusConnect(url=args.prometheus_url, disable_ssl=True)
 
-    cpu_nodes = get_cpu_usage(prometheus, args.hours, args.step)
-    print("CPU Usage per Node (last {} hours):".format(args.hours))
-    print(cpu_nodes.head(10))
-    print("\n")
+    cpu_usage = get_cpu_usage(prometheus, args.hours, args.step)
+    power = get_power_consumption(prometheus, args.power_query, args.hours, args.step)
+    if cpu_usage.empty:
+        raise SystemExit("No CPU samples in the observation window")
 
-    node_consumption = get_power_consumption(prometheus, "sum(idrac_power_supply_output_watts) by (node_name)", args.hours, args.step)
-    print("Power Consumption per Node (last {} hours):".format(args.hours))
-    print(node_consumption.head(10))
-    print("\n")
-    
-    node_distributions = {}
-    # CORREZIONE QUI: Rimosso l'operatore walrus inline che causava il SyntaxError
-    for node in cpu_nodes.columns:
-        workload_distribution = get_workload_distribution(cpu_nodes[node])
-        node_distributions[node] = workload_distribution
+    v1 = None
+    stored_capacities, stored_levels, stored_history = {}, {}, {}
+    if not args.dry_run:
+        config.load_incluster_config()
+        v1 = client.CoreV1Api()
+        stored_capacities, stored_levels, stored_history = load_node_profiles(
+            v1, args.curves_namespace, args.curves_configmap)
 
-    cpu_cores = get_cpu_cores_per_node(prometheus)
-    print("CPU Cores per Node:")
-    for node, cores in cpu_cores.items():
-        print(f"{node}: {cores} cores")
-    print("\n")
+    # Capacity c_i: stored values (needed for powered-off nodes), updated with the live
+    # core counts, and overridden by --capacities if given
+    capacities = dict(stored_capacities)
+    capacities.update({n: float(c) for n, c in get_cpu_cores_per_node(prometheus).items()})
+    if args.capacities:
+        capacities.update({n: float(c) for n, c in json.loads(args.capacities).items()})
 
-    # Mappatura della potenza (con Isotonic Regression e interpolazione lineare 0-100 attiva)
-    mapping_power = map_cpu_to_power(cpu_nodes, node_consumption, interpolate_missing=True)
-    print("CPU to Power Mapping (with interpolation 0-100):")
-    for node, mapping in mapping_power.items():
-        # Stampiamo solo i primi punti per brevità di log
-        short_mapping = {k: mapping[k] for k in sorted(mapping.keys())[:10]}
-        print(f"{node}: {short_mapping} ...")
-    print("\n")
+    # Power curves P_i(u): current window merged with the levels persisted by previous runs
+    levels = merge_power_levels(stored_levels, get_power_per_level(cpu_usage, power))
+    curves = {node: build_power_curve(node_levels) for node, node_levels in levels.items() if node_levels}
+    for node in sorted(set(capacities) | set(levels)):
+        node_levels = levels.get(node)
+        if not node_levels:
+            print(f"{node}: capacity {capacities.get(node)}, no power observations; WAP not computed")
+            continue
+        print(f"{node}: capacity {capacities.get(node)}, power observed at {len(node_levels)} levels "
+              f"({min(node_levels)}%-{max(node_levels)}%)")
 
-    # Calcolo della WAP Assoluta (In Watt pesati sul workload)
-    wap = calculate_node_wap(node_distributions, mapping_power)
+    # Workload distributions f_i(u): the same cluster workload, mapped onto each node's capacity
+    demand = get_demand_per_active_node(cpu_usage, capacities)
+    distributions = {}
+    for node in curves:
+        if node not in capacities:
+            print(f"WARNING: no capacity known for {node}; WAP not computed")
+            continue
+        distributions[node] = get_workload_distribution(get_induced_utilization(demand, capacities[node]))
 
-    print("WAP per Node:")
+    wap = calculate_wap(distributions, curves)
+    print(f"Average demand per active node: {demand.mean():.2f} cores")
+    print("WAP per node:")
     for node, value in wap.items():
-        print(f"{node}: {value:.2f}")
-    print("\n")
+        mean_u = sum(u * p for u, p in distributions[node].items())
+        print(f"  {node}: {value:.2f} W (induced mean utilization {mean_u:.1f}%)")
 
-    # Normalized Wap
-    # normalized_wap = {}
-    # for node, value in wap.items():
-    #     if node in cpu_cores and cpu_cores[node] > 0:
-    #         normalized_wap[node] = value / cpu_cores[node]
-    #     else:
-    #         normalized_wap[node] = 0.0
-    
-    # print("Normalized WAP per Core on Node:")
-    # for node, value in normalized_wap.items():
-    #     print(f"{node}: {value:.4f} W/core")
-
-
-    # aggiungi (o aggiorna) la metrica dreemk8s.io/consumption-profile sui Nodes con il valore di WAP calcolato
-    update_create_consumption_profile_metric(wap)
+    if not args.dry_run:
+        history = append_wap_history(stored_history, wap, args.wap_history)
+        save_node_profiles(v1, args.curves_namespace, args.curves_configmap, capacities, levels, history)
+        update_consumption_profile(v1, wap)

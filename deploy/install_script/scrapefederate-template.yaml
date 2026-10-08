@@ -4,6 +4,12 @@
     match[]:
       - node_cpu_seconds_total
       - node_memory_MemAvailable_bytes
+      # numero di core per nodo: serve a evaluate_predicted_cpu per il calcolo
+      # della capacita' libera su cluster eterogenei
+      - machine_cpu_cores
+      # request rate applicativo: alimenta la logica di anticipo (anti-lag).
+      # Sostituire con la metrica esposta dall'applicazione sotto test.
+      - mub_request_processing_latency_milliseconds_count
   static_configs:
     - targets:
         -  {{CONTROLPLANE_IP}}

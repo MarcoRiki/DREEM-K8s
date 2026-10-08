@@ -12,7 +12,7 @@ spec:
           serviceAccountName: forecast-sa
           containers:
             - name: update-consumption-profile
-              image: harbor.crownlabs.polito.it/cloud-sandbox/s324163/dreem-k8s/energy-profile-update:0.0.2
+              image: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s/energy-profile-update:0.0.7
               imagePullPolicy: Always
               args: [ "--prometheus-url", "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090", "--hours", "24", "--step", "30" ]
           restartPolicy: OnFailure
@@ -25,7 +25,7 @@ metadata:
   namespace: dreem
 
 ---
-# ClusterRole granting minimal permissions to read and annotate Nodes
+# ClusterRole granting minimal permissions to read and annotate Nodes, create get update ConfigMaps
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -34,6 +34,10 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch", "list"]
+  
 
 ---
 # Bind the ClusterRole to the ServiceAccount in the dreem namespace

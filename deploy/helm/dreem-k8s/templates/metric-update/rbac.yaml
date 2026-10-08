@@ -1,0 +1,40 @@
+{{- if .Values.metricUpdate.enabled }}
+{{- $sa := include "dreem.metricUpdate.serviceAccountName" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dreem.componentLabels" (list . "metric-update") | nindent 4 }}
+---
+# Read and annotate Nodes; write the power-curves ConfigMap (any namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dreem.fullname" . }}-metric-update-node-writer
+  labels:
+    {{- include "dreem.componentLabels" (list . "metric-update") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dreem.fullname" . }}-metric-update-node-writer
+  labels:
+    {{- include "dreem.componentLabels" (list . "metric-update") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dreem.fullname" . }}-metric-update-node-writer
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

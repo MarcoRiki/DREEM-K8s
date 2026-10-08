@@ -1,0 +1,62 @@
+{{- if .Values.forecast.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dreem.fullname" . }}-forecast
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dreem.componentLabels" (list . "forecast") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dreem.selectorLabels" (list . "forecast") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dreem.selectorLabels" (list . "forecast") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "dreem.forecast.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.forecast.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.forecast.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.forecast.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.forecast.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: forecast
+          image: {{ include "dreem.image" .Values.forecast.image }}
+          imagePullPolicy: {{ .Values.forecast.image.pullPolicy }}
+          args:
+            - --start-after
+            - {{ .Values.forecast.startAfter | quote }}
+            - --prometheus-url
+            - {{ .Values.forecast.prometheusUrl | default .Values.prometheus.url | quote }}
+            - --rate-interval
+            - {{ .Values.forecast.rateInterval | quote }}
+            {{- with .Values.forecast.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.forecast.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.forecast.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

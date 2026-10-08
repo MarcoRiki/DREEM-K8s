@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dreem-charts
+description: DREEM-K8s energy-aware cluster autoscaler (operator, forecaster and node energy-profile updater)
+type: application
+version: 0.1.1
+appVersion: "0.0.32"

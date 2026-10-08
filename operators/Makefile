@@ -134,6 +134,14 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
+HELM_CHART ?= ../deploy/helm/dreem-k8s
+
+.PHONY: helm-sync
+helm-sync: manifests ## Copy the generated CRDs and manager ClusterRole into the Helm chart.
+	rm -f $(HELM_CHART)/files/crds/*.yaml
+	cp config/crd/bases/*.yaml $(HELM_CHART)/files/crds/
+	cp config/rbac/role.yaml $(HELM_CHART)/files/manager-role.yaml
+
 ##@ Deployment
 
 ifndef ignore-not-found

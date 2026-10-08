@@ -12,5 +12,45 @@ data:
   Prediction_model : "LSTM" # or naive
   Mean_time_to_boot: "1"
   Enabled: "true"
-  Stabilization_cycles: "2" 
-  
+  Stabilization_cycles: "2"
+
+  # --- Anti-lag: anticipo basato sul request rate applicativo ---
+  # Le richieste si accodano prima che la CPU salga, quindi la derivata del
+  # request rate anticipa quella della CPU. La crescita misurata sugli ultimi
+  # minuti viene proiettata sulla latenza di reazione del sistema
+  # (Stabilization_cycles * Forecast_period_in_minutes + Mean_time_to_boot) e il
+  # rapporto risultante moltiplica la CPU predetta.
+  #
+  # Query PromQL: deve restituire il request rate AGGREGATO in richieste/secondo.
+  # Lasciare vuoto per disattivare e ricadere sulla derivata della CPU.
+  # NOTA: la metrica deve essere federata dal cluster gestito -> aggiungerla
+  # anche a match[] in deploy/scrapefederate.yaml.
+  # Esempio MuBench:
+  Request_rate_query: 'sum(rate(mub_request_processing_latency_milliseconds_count[2m]))'
+  # Esempio Istio:  sum(rate(istio_requests_total{reporter="destination"}[2m]))
+  # Esempio Nginx:  sum(rate(nginx_ingress_controller_requests[2m]))
+
+  # Tetto massimo del fattore di anticipo. 1.0 disattiva completamente l'anti-lag.
+  Anticipation_max_multiplier: "1.5"
+
+  # Livelli minimi sotto i quali la crescita non viene considerata: con una
+  # baseline vicina a zero il rapporto proiezione/baseline esplode e saturerebbe
+  # il cap anche su carichi irrilevanti (es. 0.2 req/s che salgono a 0.5).
+  # Il livello e' la mediana degli ultimi 5 minuti del segnale.
+  Anticipation_min_request_rate: "0.5"   # req/s
+  Anticipation_min_cpu_percent: "5.0"    # % - un nodo idle oscilla tipicamente 1-3%
+
+  # --- Scale-up reattivo sui pod Unschedulable (solo selectionProfile: QOS) ---
+  # Il loop gira ogni Pending_check_period_seconds; il forecast CPU continua a
+  # girare ogni Forecast_period_in_minutes. Un pod che resta Unschedulable per
+  # Pending_scale_up_after_seconds provoca uno scale-up di +1 nodo, senza cicli
+  # di stabilizzazione. Una sola ClusterConfiguration alla volta: dopo la fine
+  # di una si attende Pending_post_scale_up_grace_seconds perche' lo scheduler
+  # piazzi i pod sul nodo appena acceso.
+  Pending_check_period_seconds: "15"
+  Pending_scale_up_after_seconds: "300"
+  Pending_post_scale_up_grace_seconds: "60"
+  # Dopo uno scale-up reattivo il forecast non puo' spegnere nodi per questi
+  # minuti. In ogni profilo, inoltre, nessuno scale-down del forecast finche'
+  # esistono pod Unschedulable (non consumano CPU, il forecast non li vede).
+  Pending_scale_down_cooldown_minutes: "10"
