@@ -412,6 +412,20 @@ def read_forecast_cm():
 
     return p
 
+def parse_hard_checks(value):
+    """
+    Interpreta la chiave hardChecks con la stessa regola dell'operatore: vuota o
+    assente vale true, altrimenti sono ammessi solo true e false, senza
+    distinguere le maiuscole. Qualsiasi altro valore solleva ValueError.
+    """
+    normalized = (value or "").strip().lower()
+    if normalized in ("", "true"):
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"hardChecks must be true or false, got {value!r}")
+
+
 def read_cluster_configuration_cm():
     """
        The function reads the clusterConfiguration-parameters ConfigMap and updates the default values
@@ -421,6 +435,8 @@ def read_cluster_configuration_cm():
     max_nodes=5
     # profilo vuoto = scale-up reattivo disattivato
     profile = ""
+    # con hardChecks false gli scale-down del forecast non hanno piu' veti (vedi forecast_step)
+    hard_checks = True
 
     # update the CM if values are present
     v1 = client.CoreV1Api()
@@ -430,12 +446,19 @@ def read_cluster_configuration_cm():
         min_nodes = int(cm.get("minNodes", min_nodes))
         max_nodes = int(cm.get("maxNodes", max_nodes))
         profile = (cm.get("selectionProfile", profile) or "").strip().upper()
+        # con selectionPolicy RANDOM il profilo non conta, compreso lo scale-up
+        # reattivo di QOS: l'operatore sceglie i nodi a caso senza i suoi pesi
+        if (cm.get("selectionPolicy") or "").strip().upper() == "RANDOM":
+            profile = ""
+        # letta per ultima: un valore non valido lascia attivi i controlli senza
+        # far perdere le chiavi gia' lette
+        hard_checks = parse_hard_checks(cm.get("hardChecks"))
     except client.exceptions.ApiException as e:
         logging.error(f"Error during the reading of the ConfigMap: {e}. Using defaults.")
     except (TypeError, ValueError) as e:
         logging.error(f"Invalid value in cluster-configuration-parameters ConfigMap: {e}. Using defaults.")
 
-    return min_nodes, max_nodes, profile
+    return min_nodes, max_nodes, profile, hard_checks
 
 # def get_prometheus_url(args=None):
 #     local_conf= utils.load_configuration()
@@ -571,7 +594,7 @@ def scale_down_veto(state, pending):
     return None
 
 
-def forecast_step(args, params, state, pending, min_nodes, max_nodes):
+def forecast_step(args, params, state, pending, min_nodes, max_nodes, hard_checks):
     """Un ciclo del forecast CPU, eseguito ogni Forecast_period_in_minutes."""
     # Latenza di reazione reale del sistema: i cicli di stabilizzazione ancora
     # da accumulare, piu' il tempo di boot del nodo. E' l'orizzonte su cui la
@@ -605,9 +628,13 @@ def forecast_step(args, params, state, pending, min_nodes, max_nodes):
         return
     if scaling_label < 0:
         veto = scale_down_veto(state, pending)
-        if veto:
+        # con hardChecks false il veto non blocca lo scale-down, ma resta nel log
+        # per sapere quando i controlli sarebbero intervenuti
+        if veto and hard_checks:
             logger.info(f"forecast scale-down skipped: {veto}")
             return
+        if veto:
+            logger.info(f"forecast scale-down not vetoed, hardChecks is false: {veto}")
 
     required_worker = active_worker + scaling_label
     if required_worker >= int(min_nodes) and required_worker <= int(max_nodes):
@@ -648,7 +675,7 @@ def main():
     # ClusterConfiguration e lo stato condiviso non richiede lock.
     while True:
         params = read_forecast_cm()
-        min_nodes, max_nodes, profile = read_cluster_configuration_cm()
+        min_nodes, max_nodes, profile, hard_checks = read_cluster_configuration_cm()
         if not params.enabled:
             if was_enabled is not False:
                 logger.info("forecast is disabled, skipping forecast and scaling")
@@ -668,7 +695,7 @@ def main():
             reactive_step(params, state, pending, min_nodes, max_nodes)
 
         if forecast_due:
-            forecast_step(args, params, state, pending, min_nodes, max_nodes)
+            forecast_step(args, params, state, pending, min_nodes, max_nodes, hard_checks)
             next_forecast_at = time.monotonic() + params.forecast_period_in_minutes * 60
             logger.info(f"forecast finished, next forecast in {params.forecast_period_in_minutes} minutes")
 

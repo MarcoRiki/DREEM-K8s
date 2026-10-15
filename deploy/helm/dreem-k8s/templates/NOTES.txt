@@ -9,7 +9,11 @@ Components:
   - metricUpdate:  {{ include "dreem.fullname" . }}-metric-update (schedule "{{ .Values.metricUpdate.schedule }}")
 {{- end }}
 
-Selection profile: {{ .Values.config.clusterConfiguration.selectionProfile }}, nodes {{ .Values.config.clusterConfiguration.minNodes }}-{{ .Values.config.clusterConfiguration.maxNodes }}
+{{ $cc := .Values.config.clusterConfiguration -}}
+Selection: policy {{ $cc.selectionPolicy }}{{ if ne (toString $cc.selectionPolicy | upper) "RANDOM" }}, profile {{ $cc.selectionProfile }}{{ end }}, nodes {{ $cc.minNodes }}-{{ $cc.maxNodes }}
+{{- if eq (toString .Values.config.clusterConfiguration.hardChecks | lower) "false" }}
+hardChecks is false: scale-downs skip the feasibility checks, so pods may be left Pending.
+{{- end }}
 
 Check the pods with:
   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}

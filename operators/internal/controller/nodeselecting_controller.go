@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"strings"
 
 	"github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
@@ -47,6 +49,68 @@ type NodeSelectingReconciler struct {
 	client.Client
 	MaxNumberOfConfigurations int
 	Scheme                    *runtime.Scheme
+}
+
+// Node selection policies, set by the selectionPolicy key of the
+// cluster-configuration-parameters ConfigMap. TOPSIS is DREEM's own selection, which
+// ranks the candidates with the AHP weights of selectionProfile; RANDOM picks one of them
+// at random, as a baseline to compare it against.
+const (
+	selectionPolicyTOPSIS = "TOPSIS"
+	selectionPolicyRandom = "RANDOM"
+)
+
+// selectionSettings are the keys of cluster-configuration-parameters that change how a
+// node is selected. They are re-read for every NodeSelecting, so an experiment can
+// switch them without restarting the operator.
+type selectionSettings struct {
+	Policy string
+	// HardChecks false lets a node be switched off even when its pods cannot all be
+	// placed elsewhere (see buildMigrationPlan). The forecaster reads the same key and
+	// stops vetoing its scale-downs, so the two components cannot disagree on it.
+	HardChecks bool
+}
+
+// loadSelectionSettings reads the selection settings: the TOPSIS policy and the hard
+// checks on when a key is missing or empty. An unknown value is an error rather than a
+// fallback to the default, so a typo cannot run an experiment with the wrong settings.
+func loadSelectionSettings(ctx context.Context, c client.Client) (selectionSettings, error) {
+	cm := &corev1.ConfigMap{}
+	if err := c.Get(ctx, client.ObjectKey{Name: DREEM_CLUSTER_CONFIGURATION_CM_NAME, Namespace: "dreem"}, cm); err != nil {
+		return selectionSettings{}, err
+	}
+
+	policy := strings.ToUpper(strings.TrimSpace(cm.Data["selectionPolicy"]))
+	if policy == "" {
+		policy = selectionPolicyTOPSIS
+	}
+	if policy != selectionPolicyTOPSIS && policy != selectionPolicyRandom {
+		return selectionSettings{}, fmt.Errorf("selectionPolicy %q not supported, use %s or %s",
+			cm.Data["selectionPolicy"], selectionPolicyTOPSIS, selectionPolicyRandom)
+	}
+
+	// the forecaster parses hardChecks with the same rule
+	hardChecks := true
+	switch strings.ToLower(strings.TrimSpace(cm.Data["hardChecks"])) {
+	case "", "true":
+	case "false":
+		hardChecks = false
+	default:
+		return selectionSettings{}, fmt.Errorf("hardChecks %q not supported, use true or false", cm.Data["hardChecks"])
+	}
+
+	return selectionSettings{Policy: policy, HardChecks: hardChecks}, nil
+}
+
+// selectRandom applies the RANDOM policy: it picks one of nodes, which must not be
+// empty, uniformly at random, and describes the draw for the NodeSelecting status.
+func selectRandom(nodes []corev1.Node) (string, string) {
+	names := make([]string, len(nodes))
+	for i := range nodes {
+		names[i] = nodes[i].Name
+	}
+	selected := names[rand.IntN(len(names))]
+	return selected, fmt.Sprintf("RANDOM policy: %s drawn from %s", selected, strings.Join(names, ", "))
 }
 
 func (r *NodeSelectingReconciler) handleInitialPhase(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) error {
@@ -81,12 +145,19 @@ func (r *NodeSelectingReconciler) handleInitialPhase(ctx context.Context, nodeSe
 func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) error {
 	klog.FromContext(ctx).WithName("handle-running-phase")
 
+	settings, err := loadSelectionSettings(ctx, r.Client)
+	if err != nil {
+		klog.V(2).ErrorS(err, "Failed to load the selection settings", "name", nodeSelecting.Name)
+		return err
+	}
+	klog.V(2).InfoS("Selection settings", "policy", settings.Policy, "hardChecks", settings.HardChecks)
+
 	selectedNode := ""
 	msg := ""
 
 	if nodeSelecting.Spec.ScalingLabel < 0 {
 		klog.V(2).Info("Trying to scale down infrastructure")
-		err, message, node := r.selectNodeScaleDown(ctx, nodeSelecting)
+		err, message, node := r.selectNodeScaleDown(ctx, nodeSelecting, settings)
 		if err != nil {
 			return err
 		}
@@ -95,7 +166,7 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 
 	} else if nodeSelecting.Spec.ScalingLabel > 0 {
 		klog.V(2).Info("Trying to scale up infrastructure")
-		err, message, node := r.selectNodeScaleUp(ctx, nodeSelecting, r.Client)
+		err, message, node := r.selectNodeScaleUp(ctx, nodeSelecting, r.Client, settings)
 		if err != nil {
 			return err
 		}
@@ -132,7 +203,7 @@ func (r *NodeSelectingReconciler) handleRunningPhase(ctx context.Context, nodeSe
 
 }
 
-func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, k8sClient client.Client) (error, string, string) {
+func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, k8sClient client.Client, settings selectionSettings) (error, string, string) {
 	klog.FromContext(ctx).WithName("can-scale-up")
 
 	selectedNode := ""
@@ -155,6 +226,16 @@ func (r *NodeSelectingReconciler) selectNodeScaleUp(ctx context.Context, nodeSel
 		}
 
 		nodeListFiltered.Items = append(nodeListFiltered.Items, node)
+	}
+
+	if settings.Policy == selectionPolicyRandom {
+		if len(nodeListFiltered.Items) == 0 {
+			klog.V(2).Info("No powered-off node to switch on")
+			return nil, "", ""
+		}
+		node, message := selectRandom(nodeListFiltered.Items)
+		klog.V(2).InfoS("Scale up selection completed", "policy", settings.Policy, "selectedNode", node)
+		return nil, message, node
 	}
 
 	rankedNodes, err := ApplySoftConstraintsScaleUp(ctx, nodeListFiltered, k8sClient, *nodeSelecting)
@@ -215,7 +296,7 @@ func isNodeReady(node corev1.Node) bool {
 	return false
 }
 
-func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting) (error, string, string) {
+func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeSelecting *clusterv1alpha1.NodeSelecting, settings selectionSettings) (error, string, string) {
 	klog.FromContext(ctx).WithName("can-scale-down")
 
 	selectedNode := ""
@@ -237,6 +318,8 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	// For every candidate node build the single plan that would evacuate it, and keep
 	// that plan alongside the node. Each node is then scored against its own plan, so
 	// the soft criteria answer "what does the application lose if THIS node goes away".
+	// With the hard checks off no plan vetoes its node: it holds the pods that fit
+	// somewhere, and the others are left out (see buildMigrationPlan).
 	validNodeToShutdown := make([]corev1.Node, 0) // nodes that survive the hard constraints
 	plans := make(map[string]Combination, len(nodeList.Items))
 
@@ -257,11 +340,8 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 				candidateNodes = append(candidateNodes, n)
 			}
 		}
-		if len(candidateNodes) == 0 {
-			continue
-		}
 
-		plan, err := BuildMigrationPlan(ctx, r.Client, node, candidateNodes, podToScheduleList)
+		plan, err := buildMigrationPlan(ctx, r.Client, node, candidateNodes, podToScheduleList, settings.HardChecks)
 		if err != nil {
 			klog.V(2).ErrorS(err, "Failed to build a migration plan for node", "node", node.Name)
 			continue
@@ -279,6 +359,12 @@ func (r *NodeSelectingReconciler) selectNodeScaleDown(ctx context.Context, nodeS
 	if len(validNodeToShutdown) == 0 {
 		klog.V(3).Info("No node can be shutdown after checking hard constraints")
 		return nil, "", selectedNode
+	}
+
+	if settings.Policy == selectionPolicyRandom {
+		node, message := selectRandom(validNodeToShutdown)
+		klog.V(2).InfoS("Scale down selection completed", "policy", settings.Policy, "selectedNode", node)
+		return nil, message, node
 	}
 
 	klog.V(2).Info("Calling ApplySoftConstraints ", " numPlans ", len(plans), " numNodes ", len(validNodeToShutdown))

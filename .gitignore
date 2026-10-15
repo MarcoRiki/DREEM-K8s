@@ -63,3 +63,6 @@ temp/
 .env.local
 secrets.yaml
 *secret*.yaml
+
+# Helm files
+*.tgz

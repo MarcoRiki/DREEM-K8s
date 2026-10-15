@@ -243,7 +243,16 @@ func NodeFreeResources(ctx context.Context, c client.Client, node corev1.Node) (
 // every Assignment.AltNode records the destination when they come last. The affinity
 // criteria score both.
 func BuildMigrationPlan(ctx context.Context, c client.Client, drainedNode corev1.Node, candidates []corev1.Node, pods []corev1.Pod) (Combination, error) {
-	if len(candidates) == 0 {
+	return buildMigrationPlan(ctx, c, drainedNode, candidates, pods, true)
+}
+
+// buildMigrationPlan is BuildMigrationPlan with the hard constraints optional, as set by
+// the hardChecks key of cluster-configuration-parameters. With hardChecks false the plan
+// is never nil and the hard topology spread constraints are not checked: a pod that fits
+// on no candidate is left out of the plan instead of vetoing the node. It is the pod the
+// scheduler will leave Pending, so the soft criteria must not credit it with a destination.
+func buildMigrationPlan(ctx context.Context, c client.Client, drainedNode corev1.Node, candidates []corev1.Node, pods []corev1.Pod, hardChecks bool) (Combination, error) {
+	if len(candidates) == 0 && hardChecks {
 		return nil, nil
 	}
 	// A node with nothing to migrate can be switched off for free.
@@ -267,11 +276,11 @@ func BuildMigrationPlan(ctx context.Context, c client.Client, drainedNode corev1
 		resident[candidates[i].Name] = filterSystemPods(podsOn.Items)
 	}
 
-	plan := placePods(orderForPlacement(pods, true), candidates, free, resident, drainedNode.Name)
+	plan := placePods(orderForPlacement(pods, true), candidates, free, resident, drainedNode.Name, hardChecks)
 	if plan == nil {
 		return nil, nil
 	}
-	if alt := placePods(orderForPlacement(pods, false), candidates, free, resident, drainedNode.Name); alt != nil {
+	if alt := placePods(orderForPlacement(pods, false), candidates, free, resident, drainedNode.Name, hardChecks); alt != nil {
 		altNode := make(map[string]*corev1.Node, len(alt))
 		for i := range alt {
 			altNode[podKey(&alt[i].Pod)] = &alt[i].Node
@@ -282,7 +291,7 @@ func BuildMigrationPlan(ctx context.Context, c client.Client, drainedNode corev1
 	}
 
 	// topology spread is a property of the whole plan, so it is checked once at the end
-	if len(CheckTopologySpreadConstraints(ctx, c, []Combination{plan})) == 0 {
+	if hardChecks && len(CheckTopologySpreadConstraints(ctx, c, []Combination{plan})) == 0 {
 		klog.V(3).Infof("Plan for draining node %s violates a hard topology spread constraint", drainedNode.Name)
 		return nil, nil
 	}
@@ -314,8 +323,9 @@ func orderForPlacement(pods []corev1.Pod, partnersFirst bool) []corev1.Pod {
 
 // placePods places the pods in the given order, each on the admissible candidate with
 // the highest scheduler score (ties keep the first candidate), and returns nil if some
-// pod has no admissible candidate. freeInit and resident are not modified.
-func placePods(ordered []corev1.Pod, candidates []corev1.Node, freeInit map[string]AvailableResources, resident map[string][]corev1.Pod, drainedNode string) Combination {
+// pod has no admissible candidate; with hardChecks false that pod is left out of the
+// plan instead. freeInit and resident are not modified.
+func placePods(ordered []corev1.Pod, candidates []corev1.Node, freeInit map[string]AvailableResources, resident map[string][]corev1.Pod, drainedNode string, hardChecks bool) Combination {
 	free := make(map[string]AvailableResources, len(freeInit))
 	for name, f := range freeInit {
 		free[name] = AvailableResources{CPU: f.CPU.DeepCopy(), Memory: f.Memory.DeepCopy()}
@@ -344,6 +354,11 @@ func placePods(ordered []corev1.Pod, candidates []corev1.Node, freeInit map[stri
 			admissible = append(admissible, ci)
 		}
 		if len(admissible) == 0 {
+			if !hardChecks {
+				klog.V(3).Infof("No admissible destination for pod %s/%s while draining node %s, left out of the plan (hard checks off)",
+					pod.Namespace, pod.Name, drainedNode)
+				continue
+			}
 			klog.V(3).Infof("No admissible destination for pod %s/%s while draining node %s",
 				pod.Namespace, pod.Name, drainedNode)
 			return nil

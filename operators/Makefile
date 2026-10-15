@@ -1,5 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# Image URL of the forecaster, for docker-buildx-forecast and docker-buildx-all (no default)
+IMGFOR ?=
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -124,9 +126,31 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name operators-builder
 	$(CONTAINER_TOOL) buildx use operators-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	# a failed build still removes the builder and Dockerfile.cross, but fails the target
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross . || { \
+		$(CONTAINER_TOOL) buildx rm operators-builder || true; rm -f Dockerfile.cross; exit 1; }
 	- $(CONTAINER_TOOL) buildx rm operators-builder
 	rm Dockerfile.cross
+
+# The forecaster image (IMGFOR) is built from FORECAST_DIR, for linux/amd64 only by
+# default: its Dockerfile installs torch==2.2.0+cpu, which PyTorch publishes for x86_64 only.
+FORECAST_DIR ?= ../scripts/forecast
+FORECAST_PLATFORMS ?= linux/amd64
+.PHONY: docker-buildx-forecast
+docker-buildx-forecast: ## Build and push docker image for the forecaster
+	@[ -n "$(IMGFOR)" ] || { echo "Set IMGFOR to the forecaster image, e.g. IMGFOR=<registry>/forecast:<tag>"; exit 1; }
+	$(CONTAINER_TOOL) buildx build --push --platform=$(FORECAST_PLATFORMS) --tag ${IMGFOR} $(FORECAST_DIR)
+
+# Both image names are checked before anything is built, so a missing one cannot leave
+# the operator pushed without its forecaster.
+.PHONY: docker-buildx-all
+docker-buildx-all: ## Build and push the operator (IMG) and forecaster (IMGFOR) images
+	@[ "$(origin IMG)" != "file" ] && [ -n "$(IMGFOR)" ] || { \
+		echo "Set IMG and IMGFOR to the operator and forecaster images, e.g. IMG=<registry>/dreem-operator:<tag> IMGFOR=<registry>/forecast:<tag>"; \
+		exit 1; \
+	}
+	$(MAKE) docker-buildx
+	$(MAKE) docker-buildx-forecast
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.

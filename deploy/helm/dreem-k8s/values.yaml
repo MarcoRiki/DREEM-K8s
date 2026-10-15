@@ -25,8 +25,8 @@ crds:
 operator:
   replicas: 1
   image:
-    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s/dreem-operator
-    tag: "0.0.32"
+    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-simplified/dreem-operator
+    tag: "0.0.1"
     pullPolicy: IfNotPresent
   leaderElect: true
   maxConfigurations: 150000
@@ -68,8 +68,8 @@ operator:
 forecast:
   enabled: false
   image:
-    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s/forecast
-    tag: "0.0.60"
+    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-simplified/forecast
+    tag: "0.0.1"
     pullPolicy: IfNotPresent
   # Minutes to wait before the first forecast.
   startAfter: 5
@@ -126,6 +126,9 @@ config:
     minNodes: 1
     maxNodes: 3
     selectionProfile: ENERGY # NEUTRAL, QOS, ENERGY
+    selectionPolicy: TOPSIS # TOPSIS, or RANDOM as a baseline (selectionProfile is then ignored)
+    # false skips the scale-down feasibility checks, in the operator and in the forecaster
+    hardChecks: true
 
   # ConfigMap forecast-parameters
   forecastParameters:
