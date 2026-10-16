@@ -56,7 +56,6 @@ spec:
             - --leader-elect
             {{- end }}
             - --health-probe-bind-address=:8081
-            - --max-configurations={{ int64 .Values.operator.maxConfigurations }}
             {{- with .Values.operator.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

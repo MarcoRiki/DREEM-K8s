@@ -36,7 +36,6 @@ import (
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	"github.com/MarcoRiki/DREEM-K8s/internal/controller"
-	clusterapi "sigs.k8s.io/cluster-api/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,19 +62,14 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	var err error
-	// add clusterapi scheme
 	err = clusterv1alpha1.AddToScheme(scheme.Scheme)
-	err = clusterapi.AddToScheme(scheme.Scheme)
-
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{
-			filepath.Join("..", "..", "config", "crd", "bases"),
-			filepath.Join("..", "..", "config", "capi-crds", "bases")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -100,9 +94,8 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&controller.NodeSelectingReconciler{
-		Client:                    k8sClient,
-		Scheme:                    scheme.Scheme,
-		MaxNumberOfConfigurations: 10000,
+		Client: k8sClient,
+		Scheme: scheme.Scheme,
 	}).SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
 

@@ -1,12 +1,12 @@
 # DREEM Helm chart
 
-Installs DREEM on the management cluster:
+Installs, on the management cluster, the reactive node autoscaler of Menouer et al. reimplemented on the DREEM-K8s operator (see the top-level README):
 
 | Component | Enabled by | Contents |
 |---|---|---|
 | CRDs | `crds.install` (default `true`) | `ClusterConfiguration`, `NodeSelecting`, `NodeHandling` |
 | Operator | always | Deployment, ServiceAccount, manager ClusterRole, leader-election Role, metrics Service and roles (`operator.metrics.enabled`) |
-| Configuration | always | ConfigMaps `cluster-configuration-parameters`, `forecast-parameters`, `selection-weights-scale-up`, `selection-weights-scale-down`; optional `bmc-credentials-<node>` Secrets |
+| Configuration | always | ConfigMaps `cluster-configuration-parameters`, `forecast-parameters`; optional `bmc-credentials-<node>` Secrets |
 | Forecaster | `forecast.enabled` (default `true`) | Deployment, ServiceAccount, Role and ClusterRole |
 | metricUpdate | `metricUpdate.enabled` (default `false`) | CronJob, ServiceAccount, ClusterRole |
 
@@ -23,7 +23,7 @@ Override the configuration with `--set` or a values file:
 
 ```sh
 helm upgrade --install dreem deploy/helm/dreem-k8s -n dreem --create-namespace \
-  --set config.clusterConfiguration.selectionProfile=QOS \
+  --set config.clusterConfiguration.hardChecks=true \
   --set metricUpdate.enabled=true \
   -f my-values.yaml
 ```

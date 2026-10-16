@@ -75,18 +75,6 @@ sleep 2
 
 echo "Verifying if the configmaps for the forecast parameters are created on the management cluster..."
 
-echo "ConfigMap: selection-weights-scale-up"
-kubectl get configmap selection-weights-scale-up -n dreem --kubeconfig $MANAGEMENT_KUBECONFIG
-if [ $? -ne 0 ]; then
-  echo "Error: ConfigMap selection-weights-scale-up is not created on the management cluster"
-  exit 1
-fi
-echo "ConfigMap: selection-weights-scale-down"
-kubectl get configmap selection-weights-scale-down -n dreem --kubeconfig $MANAGEMENT_KUBECONFIG
-if [ $? -ne 0 ]; then
-  echo "Error: ConfigMap selection-weights-scale-down is not created on the management cluster"
-  exit 1
-fi
 echo "ConfigMap: forecast-parameters"
 kubectl get configmap forecast-parameters -n dreem --kubeconfig $MANAGEMENT_KUBECONFIG
 if [ $? -ne 0 ]; then

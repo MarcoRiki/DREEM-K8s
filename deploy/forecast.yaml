@@ -28,8 +28,8 @@ spec:
       serviceAccountName: forecast-sa
       containers:
       - name: forecast
-        image: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s/dreem-forecast:0.0.60
-        args: ["--start-after", "5", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",  "--rate-interval", "10m"]  
+        image: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-menouer/menouer-forecaster:0.0.1
+        args: ["--start-after", "5", "--prometheus-url", "http://kind-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090"]
 
 ---
 apiVersion: v1
@@ -77,29 +77,19 @@ subjects:
     namespace: dreem
 
 ---
-# ClusterRole per accedere alle Machines di Cluster API, Secrets e Nodes
+# ClusterRole per leggere Nodes e Pods
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: forecast-machines-reader
 rules:
-  # Permessi per leggere le Machines (Cluster API)
-  - apiGroups: ["cluster.x-k8s.io"]
-    resources: ["machines"]
-    verbs: ["get", "list", "watch"]
-  
-  # Permessi per leggere Secrets (kubeconfig del cluster esterno)
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list"]
-  
-  # Permessi per leggere Nodes
+  # Permessi per leggere Nodes: worker attivi e spenti
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
 
-  # Permessi per leggere i Pod in tutti i namespace: rilevamento dei pod
-  # Unschedulable (scale-up reattivo e veto sugli scale-down)
+  # Permessi per leggere i Pod in tutti i namespace: i pod Unschedulable,
+  # i Pending_pods dell'algoritmo di Menouer et al.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]

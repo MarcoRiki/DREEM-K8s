@@ -76,8 +76,7 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-          - --max-configurations=50000
-        image: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s/dreem-operator:0.0.32
+        image: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-menouer/menouer-operator:0.0.1
         imagePullPolicy: IfNotPresent
         
         name: manager

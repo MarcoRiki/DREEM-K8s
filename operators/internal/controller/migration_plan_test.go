@@ -8,7 +8,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func planTestNode(name, size string) corev1.Node {
@@ -38,101 +37,69 @@ func planTestPod(name, app, node, cpu string, affinity *corev1.Affinity) *corev1
 	}
 }
 
-// the anchor must run on a big node, the probe prefers its anchor's node (weight 100)
+// the anchor must run on a big node
 var planTestAnchorAffinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 	RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 		MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "size", Operator: corev1.NodeSelectorOpIn, Values: []string{"big"}}},
 	}}},
 }}
 
-var planTestProbeAffinity = &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
-	PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
-		Weight: 100,
-		PodAffinityTerm: corev1.PodAffinityTerm{
-			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "aa"}},
-			TopologyKey:   "kubernetes.io/hostname",
-		},
-	}},
-}}
-
-// drains a big node running an anchor and its probe; fillers set the CPU already used
-// on the other nodes. Returns the plan and the pod affinity lost.
-func runDrainScenario(t *testing.T, fillers map[string]string) (Combination, int) {
+// buildPlan drains big-d, which runs pods, towards candidates; objs are the other pods.
+func buildPlan(t *testing.T, candidates []corev1.Node, pods []*corev1.Pod, objs ...client.Object) Combination {
 	t.Helper()
 	drained := planTestNode("big-d", "big")
-	candidates := []corev1.Node{planTestNode("big-1", "big"), planTestNode("big-2", "big"), planTestNode("small-1", "small")}
-	anchor := planTestPod("aa-0", "aa", "big-d", "500m", planTestAnchorAffinity)
-	probe := planTestPod("pa-0", "pa", "big-d", "1000m", planTestProbeAffinity)
-
-	objs := []client.Object{&drained, anchor.DeepCopy(), probe.DeepCopy()}
+	objs = append(objs, &drained)
+	moving := make([]corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		objs = append(objs, pod.DeepCopy())
+		moving = append(moving, *pod)
+	}
 	for i := range candidates {
 		objs = append(objs, &candidates[i])
 	}
-	for node, cpu := range fillers {
-		objs = append(objs, planTestPod("filler-"+node, "filler", node, cpu, nil))
-	}
-	c := fake.NewClientBuilder().WithObjects(objs...).
-		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
-			return []string{o.(*corev1.Pod).Spec.NodeName}
-		}).Build()
-
-	ctx := context.Background()
-	plan, err := BuildMigrationPlan(ctx, c, drained, candidates, []corev1.Pod{*anchor, *probe})
-	if err != nil || plan == nil {
-		t.Fatalf("no plan: %v", err)
-	}
-	for _, a := range plan {
-		alt := "-"
-		if a.AltNode != nil {
-			alt = a.AltNode.Name
-		}
-		t.Logf("%s -> %s, other order -> %s", a.Pod.Name, a.Node.Name, alt)
-	}
-	lost, err := GetPreferredInterPodAffinity(drained, plan, c, ctx)
+	plan, err := buildMigrationPlan(context.Background(), fakeClientWithPodIndex(objs...), drained, candidates, moving)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("pod affinity lost: %d", lost)
-	return plan, lost
+	return plan
 }
 
-func TestPlanSplitsPairWhenProbeFirstPicksSmallNode(t *testing.T) {
-	// big nodes nearly full, small node empty: placed first, the probe picks the small
-	// node, where its anchor cannot follow; placed after the anchor, it joins it
-	plan, lost := runDrainScenario(t, map[string]string{"big-1": "7", "big-2": "7"})
-	if lost != 50 {
-		t.Fatalf("expected 50 (kept in one order, broken in the other), got %d", lost)
-	}
-	for _, a := range plan {
-		if a.Pod.Name == "pa-0" && (a.AltNode == nil || a.AltNode.Name != "small-1") {
-			t.Fatalf("probe placed first should land on small-1, got %v", a.AltNode)
-		}
-	}
-}
+func TestPlanMovesEveryPodOrRefusesTheNode(t *testing.T) {
+	pods := []*corev1.Pod{planTestPod("a-0", "a", "big-d", "1", nil), planTestPod("b-0", "b", "big-d", "2", nil)}
 
-func TestPlanKeepsPairWhenProbeFirstPicksBigNode(t *testing.T) {
-	// small node nearly full: placed first, the probe picks a big node and the anchor
-	// follows it (the probe's preference counts for the anchor too)
-	_, lost := runDrainScenario(t, map[string]string{"small-1": "9"})
-	if lost != 0 {
-		t.Fatalf("expected 0 (kept in both orders), got %d", lost)
+	// 3 CPUs free on big-1: both pods fit
+	plan := buildPlan(t, []corev1.Node{planTestNode("big-1", "big")}, pods,
+		planTestPod("filler", "filler", "big-1", "7", nil))
+	if len(plan) != 2 {
+		t.Fatalf("expected both pods placed, got %v", plan)
+	}
+
+	// 2 CPUs free for 3 CPUs of pods
+	plan = buildPlan(t, []corev1.Node{planTestNode("big-1", "big")}, pods,
+		planTestPod("filler", "filler", "big-1", "8", nil))
+	if plan != nil {
+		t.Fatalf("expected no plan, got %v", plan)
 	}
 }
 
-func TestPlanNodeWithoutPairsLosesNothing(t *testing.T) {
-	drained := planTestNode("big-d", "big")
-	candidates := []corev1.Node{planTestNode("big-1", "big")}
-	filler := planTestPod("filler-d", "filler", "big-d", "1", nil)
-	c := fake.NewClientBuilder().WithObjects(&drained, &candidates[0], filler.DeepCopy()).
-		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
-			return []string{o.(*corev1.Pod).Spec.NodeName}
-		}).Build()
-	ctx := context.Background()
-	plan, err := BuildMigrationPlan(ctx, c, drained, candidates, []corev1.Pod{*filler})
-	if err != nil || len(plan) != 1 {
-		t.Fatalf("expected a one-pod plan, got %v, %v", plan, err)
+func TestPlanFollowsRequiredNodeAffinity(t *testing.T) {
+	anchor := []*corev1.Pod{planTestPod("aa-0", "aa", "big-d", "500m", planTestAnchorAffinity)}
+
+	if plan := buildPlan(t, []corev1.Node{planTestNode("small-1", "small")}, anchor); plan != nil {
+		t.Fatalf("the anchor cannot go to a small node, got %v", plan)
 	}
-	if lost, _ := GetPreferredInterPodAffinity(drained, plan, c, ctx); lost != 0 {
-		t.Fatalf("expected 0, got %d", lost)
+	plan := buildPlan(t, []corev1.Node{planTestNode("small-1", "small"), planTestNode("big-1", "big")}, anchor)
+	if len(plan) != 1 || plan[0].Node.Name != "big-1" {
+		t.Fatalf("expected the anchor on big-1, got %v", plan)
+	}
+}
+
+func TestPlanForANodeWithoutPods(t *testing.T) {
+	if plan := buildPlan(t, []corev1.Node{planTestNode("big-1", "big")}, nil); plan == nil || len(plan) != 0 {
+		t.Fatalf("a node with nothing to migrate: expected an empty plan, got %v", plan)
+	}
+	// the last worker has nowhere to send its pods, even when it has none
+	if plan := buildPlan(t, nil, nil); plan != nil {
+		t.Fatalf("no destination: expected no plan, got %v", plan)
 	}
 }

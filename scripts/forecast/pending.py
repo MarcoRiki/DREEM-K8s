@@ -1,9 +1,10 @@
 """
-Rilevamento dei pod non schedulabili, usato dallo scale-up reattivo (profilo QOS)
-e dal veto sugli scale-down del forecast.
+Rilevamento dei pod non schedulabili: sono i Pending_pods dell'algoritmo di Menouer
+et al., che scala in su se ce n'e' almeno uno e in giu' solo se non ce ne sono.
 
-Un pod in attesa non consuma CPU, quindi il forecast non lo vede: questo modulo
-fornisce il segnale che la sola CPU non puo' dare.
+Il paper conta tutti i pod pending; qui si contano quelli che il kube-scheduler ha
+marcato Unschedulable e che un worker acceso in piu' potrebbe ospitare (vedi
+list_unschedulable_pods).
 """
 import logging
 from datetime import datetime, timezone

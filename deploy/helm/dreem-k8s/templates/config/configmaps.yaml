@@ -18,28 +18,4 @@ metadata:
     {{- include "dreem.labels" $ | nindent 4 }}
 data:
   {{- include "dreem.stringData" .forecastParameters | trim | nindent 2 }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: selection-weights-scale-up
-  namespace: {{ $.Release.Namespace }}
-  labels:
-    {{- include "dreem.labels" $ | nindent 4 }}
-data:
-  {{- include "dreem.stringData" .selectionWeightsScaleUp | trim | nindent 2 }}
----
-# Each profile is a YAML block whose values the operator parses as strings.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: selection-weights-scale-down
-  namespace: {{ $.Release.Namespace }}
-  labels:
-    {{- include "dreem.labels" $ | nindent 4 }}
-data:
-  {{- range $profile, $weights := .selectionWeightsScaleDown }}
-  {{ $profile }}: |
-    {{- include "dreem.stringData" $weights | trim | nindent 4 }}
-  {{- end }}
 {{- end }}

@@ -10,9 +10,9 @@ Components:
 {{- end }}
 
 {{ $cc := .Values.config.clusterConfiguration -}}
-Selection: policy {{ $cc.selectionPolicy }}{{ if ne (toString $cc.selectionPolicy | upper) "RANDOM" }}, profile {{ $cc.selectionProfile }}{{ end }}, nodes {{ $cc.minNodes }}-{{ $cc.maxNodes }}
+Autoscaler: Menouer et al., nodes chosen with PROMETHEE, nodes {{ $cc.minNodes }}-{{ $cc.maxNodes }}
 {{- if eq (toString .Values.config.clusterConfiguration.hardChecks | lower) "false" }}
-hardChecks is false: scale-downs skip the feasibility checks, so pods may be left Pending.
+hardChecks is false: as in the paper, scale-downs skip the feasibility checks, so pods may be left Pending.
 {{- end }}
 
 Check the pods with:

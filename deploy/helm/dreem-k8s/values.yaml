@@ -25,11 +25,10 @@ crds:
 operator:
   replicas: 1
   image:
-    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-simplified/dreem-operator
+    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-menouer/menouer-operator
     tag: "0.0.1"
     pullPolicy: IfNotPresent
   leaderElect: true
-  maxConfigurations: 150000
   extraArgs: []
   metrics:
     # Expose /metrics over HTTPS on 8443, protected by authn/authz.
@@ -63,18 +62,16 @@ operator:
   affinity: {}
 
 # --------------------------------------------------------------------------
-# Forecaster
+# Forecaster: runs Menouer et al.'s Algorithm 1 and requests the scaling
 # --------------------------------------------------------------------------
 forecast:
-  enabled: false
+  enabled: true
   image:
-    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-simplified/forecast
+    repository: harbor.ng.crownlabs.polito.it/marco-miracapillo/dreem-k8s-menouer/menouer-forecaster
     tag: "0.0.1"
     pullPolicy: IfNotPresent
-  # Minutes to wait before the first forecast.
+  # Minutes to wait before the first decision.
   startAfter: 5
-  # Interval of the PromQL rate() function.
-  rateInterval: 10m
   # Overrides prometheus.url when set.
   prometheusUrl: ""
   extraArgs: []
@@ -125,64 +122,16 @@ config:
   clusterConfiguration:
     minNodes: 1
     maxNodes: 3
-    selectionProfile: ENERGY # NEUTRAL, QOS, ENERGY
-    selectionPolicy: TOPSIS # TOPSIS, or RANDOM as a baseline (selectionProfile is then ignored)
-    # false skips the scale-down feasibility checks, in the operator and in the forecaster
-    hardChecks: true
+    # false: Menouer et al. as published; true: a node is switched off only if its pods fit on the other nodes
+    hardChecks: false
 
-  # ConfigMap forecast-parameters
+  # ConfigMap forecast-parameters: Algorithm 1 of Menouer et al., with the paper's values
   forecastParameters:
-    Past_time_window: 5
-    Prometheus_time_window_prediction_in_minutes: 60
-    Thresholds_min: 40
-    Thresholds_max: 60
-    Forecast_period_in_minutes: 5
-    Prediction_model: LSTM # or naive
-    Mean_time_to_boot: 1
     Enabled: true
-    Stabilization_cycles: 2
-    # Must be federated from the target cluster (match[] in deploy/scrapefederate.yaml).
-    # Empty disables the request-rate anticipation.
-    Request_rate_query: sum(rate(mub_request_processing_latency_milliseconds_count[2m]))
-    Anticipation_max_multiplier: 1.5
-    Anticipation_min_request_rate: 0.5
-    Anticipation_min_cpu_percent: 5.0
-    Pending_check_period_seconds: 15
-    Pending_scale_up_after_seconds: 300
-    Pending_post_scale_up_grace_seconds: 60
-    Pending_scale_down_cooldown_minutes: 10
-
-  # ConfigMap selection-weights-scale-up
-  selectionWeightsScaleUp:
-    EnergyProfile: 0.5
-    PowerCycles: 0.5
-
-  # ConfigMap selection-weights-scale-down: one block per selectionProfile.
-  selectionWeightsScaleDown:
-    energy:
-      PreferredNodeAffinity: 0.0053
-      PreferredPodAffinity: 0.0098
-      PreferredPodAntiAffinity: 0.0098
-      EnergyProfile: 0.7500
-      PowerCycles: 0.1500
-      NumberOfRunningPods: 0.0375
-      TopologySpread: 0.0375
-    neutral:
-      PreferredNodeAffinity: 0.0267
-      PreferredPodAffinity: 0.0492
-      PreferredPodAntiAffinity: 0.0492
-      EnergyProfile: 0.4167
-      PowerCycles: 0.0833
-      NumberOfRunningPods: 0.1874
-      TopologySpread: 0.1874
-    qos:
-      PreferredNodeAffinity: 0.0480
-      PreferredPodAffinity: 0.0886
-      PreferredPodAntiAffinity: 0.0886
-      EnergyProfile: 0.0833
-      PowerCycles: 0.0167
-      NumberOfRunningPods: 0.3373
-      TopologySpread: 0.3373
+    Menouer_load_up: 65 # %
+    Menouer_load_down: 40 # %
+    Menouer_pending_pod_seconds: 120
+    Menouer_period_seconds: 60
 
   # One Secret bmc-credentials-<node> per entry, read by the NodeHandling
   # controller to power servers on/off. Leave empty to manage the Secrets

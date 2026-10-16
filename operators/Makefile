@@ -132,8 +132,8 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm operators-builder
 	rm Dockerfile.cross
 
-# The forecaster image (IMGFOR) is built from FORECAST_DIR, for linux/amd64 only by
-# default: its Dockerfile installs torch==2.2.0+cpu, which PyTorch publishes for x86_64 only.
+# The forecaster image (IMGFOR) is built from FORECAST_DIR, for linux/amd64 by default,
+# the platform of the testbed; it is plain Python, so FORECAST_PLATFORMS can add others.
 FORECAST_DIR ?= ../scripts/forecast
 FORECAST_PLATFORMS ?= linux/amd64
 .PHONY: docker-buildx-forecast

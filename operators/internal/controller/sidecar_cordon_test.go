@@ -91,7 +91,7 @@ func TestPlanRejectsDrainThatOnlyFitsWithoutSidecars(t *testing.T) {
 			return []string{o.(*corev1.Pod).Spec.NodeName}
 		}).Build()
 
-	plan, err := BuildMigrationPlan(context.Background(), c, drained, []corev1.Node{dest}, []corev1.Pod{*moving})
+	plan, err := buildMigrationPlan(context.Background(), c, drained, []corev1.Node{dest}, []corev1.Pod{*moving})
 	if err != nil {
 		t.Fatal(err)
 	}

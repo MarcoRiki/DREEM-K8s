@@ -42,7 +42,6 @@ import (
 
 	clusterv1alpha1 "github.com/MarcoRiki/DREEM-K8s/api/v1alpha1"
 	"github.com/MarcoRiki/DREEM-K8s/internal/controller"
-	capi "sigs.k8s.io/cluster-api/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -58,7 +57,6 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(capi.AddToScheme(scheme))
 	utilruntime.Must(clusterv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
@@ -73,10 +71,9 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var maxNumberOfConfigurations int
 
-	flag.IntVar(&maxNumberOfConfigurations, "max-configurations", 10000,
-		"The maximum number of configurations to consider during the selection process.")
+	// accepted so that a Deployment of DREEM's operator can run this image unchanged
+	flag.Int("max-configurations", 0, "Unused: DREEM's TOPSIS selection option, not part of Menouer et al.'s.")
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -228,9 +225,8 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.NodeSelectingReconciler{
-		Client:                    mgr.GetClient(),
-		Scheme:                    mgr.GetScheme(),
-		MaxNumberOfConfigurations: maxNumberOfConfigurations,
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeSelecting")
 		os.Exit(1)

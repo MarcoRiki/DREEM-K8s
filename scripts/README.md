@@ -3,13 +3,7 @@
 This folder contains scripts that are used to automate various tasks related to the project.
 
 ## Forecast
-The `forecast` script is used to generate forecasts based on the data collected via Prometheus.
-The forecast is used to predict whether the scaling action is required or not.
-If required, the script creates a new `ClusterConfiguration` object to trigger the DREEM controller to perform the scaling action.
+The `forecast` script runs the decision rule of Menouer et al.'s reactive node autoscaler (Algorithm 1 of "Reactive Autoscaling of Kubernetes Nodes", FRAME@HPDC 2024). Every minute it reads the CPU, memory and storage load of the active workers from Prometheus, the Unschedulable pods and the powered-off workers, and when the algorithm asks for one node more or one less it creates a new `ClusterConfiguration` object, so that the controller performs the scaling action. The rule itself is in `menouer.py`, tested by `test_menouer.py` (`python -m unittest test_menouer`), which reproduces the example of Section 4 of the paper.
 
-## NodeSelection
-The `node_selection` script is used to select the nodes that will be used for the scaling according to some predefined criteria.
-This script was used in the early stages of the project to select the nodes for scaling, but it is not currently used in the project as the DREEM controller has its own node selection mechanism.
-
-## MetricUpdate
-The `metricUpdate` script is used to retrieve the actual consumption of the bare metal servers and update a Custom Annotation on the associated MachineDeployment object. It will run as a CronJob every 5 minutes to ensure that the DREEM controller has the most up-to-date information about the resource consumption of the nodes in the cluster. This information is crucial for making informed scaling decisions based on the actual usage of the resources.
+## MetricUpdate
+The `metricUpdate` script is used to retrieve the actual consumption of the bare metal servers and update the `dreemk8s.io/consumption-profile` annotation of their nodes. It runs as a CronJob. The annotation is the energy figure that the controller's PROMETHEE ranking minimizes when it switches a node on and maximizes when it switches one off.

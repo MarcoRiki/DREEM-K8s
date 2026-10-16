@@ -46,8 +46,6 @@ spec:
             - {{ .Values.forecast.startAfter | quote }}
             - --prometheus-url
             - {{ .Values.forecast.prometheusUrl | default .Values.prometheus.url | quote }}
-            - --rate-interval
-            - {{ .Values.forecast.rateInterval | quote }}
             {{- with .Values.forecast.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

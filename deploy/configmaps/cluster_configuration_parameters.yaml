@@ -6,7 +6,5 @@ metadata:
 data:
   minNodes: "1"
   maxNodes: "3" #worker + cp
-  selectionProfile: "ENERGY" # NEUTRAL, QOS, ENERGY
-  selectionPolicy: "TOPSIS" # TOPSIS, or RANDOM as a baseline (selectionProfile is then ignored)
-  hardChecks: "true" # false: scale-downs skip the feasibility checks, in the operator and in the forecaster
+  hardChecks: "false" # false: Menouer et al. as published; true: a node is switched off only if its pods fit on the other nodes
 
